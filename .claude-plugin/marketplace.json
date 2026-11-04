@@ -1,0 +1,12 @@
+{
+  "name": "claude-chao-garden",
+  "owner": { "name": "lunabeanbean" },
+  "description": "Claude Chao Garden: a chao garden mod for the Claude desktop app.",
+  "plugins": [
+    {
+      "name": "chao-garden",
+      "source": "./",
+      "description": "A chao garden above the typing box in the Claude desktop app."
+    }
+  ]
+}
