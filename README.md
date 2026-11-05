@@ -1,8 +1,8 @@
 # Claude Chao Garden
 
-![The chao garden above the typing box: twinkling stars, a fruit tree and four chao](preview.png)
+![The chao garden above the typing box: a glowing crystal cave with a fruit tree, an egg and four chao](preview.png)
 
-A little chao garden that lives above the typing box in the Claude desktop app. Chao hatch from eggs, grow up and evolve from the work Claude does in your chats, find a class, and fight corrupted omochao right on the garden. It is a Claude Code mod: it runs on your own computer and adds nothing to what is sent to Claude.
+A little chao garden that lives above the typing box in the Claude desktop app. The chao live in a glowing crystal cave, with soft-lit crystals, a pool and floating motes of light. Chao hatch from eggs, grow up and evolve from the work Claude does in your chats, find a class, and fight corrupted omochao right on the garden. It is a Claude Code mod: it runs on your own computer and adds nothing to what is sent to Claude.
 
 ## What happens in the garden
 

@@ -63,6 +63,7 @@ import {
 } from './battle'
 import type { Battle, BattleSave, Corruption } from './battle'
 import { challengerSvg, fightSvg } from './fight'
+import { CAVE_SVG } from './scenery'
 
 // How many rows tall the band is (what the Gmail box used to hold up: on the desktop its border is a thin line,
 // so it was about 3 rows, marginTop 2 plus one text row). Raise it to make the band taller.
@@ -443,36 +444,6 @@ const hatchedNames = (gd: Garden) =>
     .map(c => c.name)
     .join(', ') || 'only eggs so far'
 
-// Deterministic pseudo-random so the drawing is stable between redraws.
-const rand = (i: number) => {
-  const x = Math.sin(i * 9301 + 49297) * 233280
-  return x - Math.floor(x)
-}
-
-// Twinkling stars behind the garden, on a jittered grid (cells, each with one star placed randomly inside) so they
-// fill evenly.
-const STAR_COLORS = ['#ffec99', '#fff3bf', '#a5d8ff']
-const starsSvg = (width: number, height: number, density: number): string => {
-  const cols = Math.max(6, Math.round(width / density))
-  const rows = Math.max(1, Math.round(height / 28))
-  const items: string[] = []
-  for (let i = 0; i < cols * rows; i++) {
-    const cellW = width / cols
-    const cellH = height / rows
-    const x = Math.round((i % cols + 0.15 + rand(i + 1) * 0.7) * cellW)
-    const y = Math.round((Math.floor(i / cols) + 0.3 + rand(i + 101) * 0.6) * cellH) + 4
-    const size = 8 + Math.round(rand(i + 201) * 10)
-    const dur = (2 + rand(i + 301) * 3).toFixed(1)
-    const begin = (rand(i + 401) * 3).toFixed(1)
-    items.push(
-      `<text x="${x}" y="${y}" font-size="${size}" fill="${STAR_COLORS[i % STAR_COLORS.length]}" text-anchor="middle">\u2726` +
-        `<animate attributeName="opacity" values="0.1;1;0.1" dur="${dur}s" begin="${begin}s" repeatCount="indefinite"/></text>`,
-    )
-  }
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${items.join('')}</svg>`
-}
-// The stars never change, so they are built once.
-const STARS_SVG = starsSvg(900, 84, 52)
 
 // "Chao Garden" in cute script across the top of the band.
 const title = (): string =>
@@ -945,7 +916,7 @@ export const register: Register = (on, options) => {
     return withButtons(Box, await next(e), buttons)
   })
 
-  // The garden band above the typing box (desktop app only): twinkling stars, the title, the tree, each chao, the day's
+  // The garden band above the typing box (desktop app only): the crystal cave (scenery.ts), the title, the tree, each chao, the day's
   // challenger and any fight. With /chao garden off it shows nothing.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || e.surface !== 'desktop') return next(e)
@@ -982,7 +953,7 @@ export const register: Register = (on, options) => {
     return (
       <Box position="relative" overflow="hidden" flexDirection="column">
         <Box position="absolute" top={-1} left={0}>
-          <Svg source={STARS_SVG} alt="Twinkling stars" width={900} height={84} isInteractive />
+          <Svg source={CAVE_SVG} alt="A glowing crystal cave" width={900} height={84} isInteractive />
         </Box>
         {/* The title is its own picture, so it can step aside while a fight plays in the middle of the band. */}
         {fightPic ? null : (

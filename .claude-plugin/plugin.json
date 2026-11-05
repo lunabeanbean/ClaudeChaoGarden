@@ -1,6 +1,6 @@
 {
   "name": "chao-garden",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A chao garden above the typing box in the Claude desktop app. Chao hatch, grow and evolve from the work Claude does, find classes, and fight corrupted omochao. /chao to see them.",
   "author": { "name": "lunabeanbean" },
   "homepage": "https://github.com/lunabeanbean/ClaudeChaoGarden",
