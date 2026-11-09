@@ -109,6 +109,17 @@ const DEFS =
   `<g id="puff"><circle cx="-4" cy="-4" r="4" fill="#d8d0e8" opacity="0.85"/><circle cx="3" cy="-6" r="5" fill="#ece6f6" opacity="0.85"/><circle cx="2" cy="0" r="3.5" fill="#d8d0e8" opacity="0.85"/></g>` +
   `<g id="err"><rect x="-10" y="-6.5" width="20" height="9" rx="2" fill="#2b2f3a" stroke="#ff5a5a" stroke-width="0.6"/><text y="0.6" font-size="6.5" font-weight="bold" font-family="monospace" text-anchor="middle" fill="#ff5a5a">ERR</text></g>` +
   `<g id="warn">${txt('!', 12, '#ff5a7a')}</g>` +
+  // temperament and animal moves (1.6.0)
+  `<g id="pennant"><path d="M0,7 L0,-10" stroke="#a0703a" stroke-width="1.2"/><path d="M0,-10 L10,-7 L0,-3.6 Z" fill="#ff5a7a" stroke="#ffffff" stroke-width="0.4"/></g>` +
+  `<g id="jaws"><circle r="9.5" fill="#5a2a8a" opacity="0.35"/><path d="M-8,-5 Q0,-11 8,-5" fill="none" stroke="#b07cff" stroke-width="2"/><path d="M-8,5 Q0,11 8,5" fill="none" stroke="#b07cff" stroke-width="2"/>` +
+  `<path d="M-5,-6.6 L-3.5,-2.6 L-2,-7.2 Z M1,-7.4 L2.5,-3 L4,-6.8 Z M-4,6.6 L-2.5,2.6 L-1,7.2 Z M2,7.4 L3.5,3 L5,6.8 Z" fill="#ffffff"/></g>` +
+  `<g id="claws"><path d="M-7,-8 Q-2,0 -5,8 M-2,-9 Q3,-1 0,7 M3,-10 Q8,-2 5,6" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/></g>` +
+  `<g id="arms"><path d="M-12,-8 Q-15,2 -3,4" fill="none" stroke="#8b5e3c" stroke-width="3.2" stroke-linecap="round"/><path d="M12,-8 Q15,2 3,4" fill="none" stroke="#8b5e3c" stroke-width="3.2" stroke-linecap="round"/><circle cx="-3" cy="4" r="2" fill="#d9a679"/><circle cx="3" cy="4" r="2" fill="#d9a679"/></g>` +
+  `<g id="sheep"><circle cx="-1.6" cy="-2.4" r="2.5" fill="#f6efe0" stroke="#bfb39a" stroke-width="0.4"/><circle cx="1.4" cy="-2.6" r="2.5" fill="#f6efe0" stroke="#bfb39a" stroke-width="0.4"/><circle cx="4" cy="-3.2" r="1.5" fill="#5b4a5e"/><path d="M-2,-0.4 v1.6 M2,-0.4 v1.6" stroke="#5b4a5e" stroke-width="0.7"/></g>` +
+  `<g id="wave"><path d="M0,-5 Q4,0 0,5" fill="none" stroke="#ffd84a" stroke-width="1.3" stroke-linecap="round"/></g>` +
+  `<g id="ice"><ellipse rx="10" ry="1.5" fill="#a5d8ff" opacity="0.75"/><ellipse cx="-3" rx="5" ry="0.8" fill="#ffffff" opacity="0.8"/></g>` +
+  `<g id="drop"><circle r="1.3" fill="#74c0fc"/></g>` +
+  `<g id="mimic"><circle r="12" fill="none" stroke="#ff9ed2" stroke-width="0.9"/><circle r="9" fill="none" stroke="#a5d8ff" stroke-width="0.9"/><circle r="6" fill="none" stroke="#c5f6a0" stroke-width="0.9"/></g>` +
   `</defs>`
 
 // Status icons over a head.
@@ -212,6 +223,17 @@ export const fightSvg = (b: Battle, looks: Record<string, ChaoLook>, from: Recor
     const dx = Math.sign(gap) * Math.max(8, Math.abs(gap) - 30)
     pos[id]?.push([t, `${x} ${GROUND}`], [t + S * 0.4, `${s(x + dx)} ${GROUND}`], [t + S * 0.6, `${s(x + dx)} ${GROUND}`], [t + S * 0.92, `${x} ${GROUND}`])
   }
+  // a leaping attack: like a lunge, but up through the air (h px high) on the way in
+  const leap = (id: string, t: number, to: number, h: number) => {
+    const x = X[id]
+    if (x === undefined) return
+    const gap = to - x
+    const dx = Math.sign(gap) * Math.max(8, Math.abs(gap) - 30)
+    pos[id]?.push([t, `${x} ${GROUND}`], [t + S * 0.2, `${s(x + dx / 2)} ${GROUND - h}`], [t + S * 0.4, `${s(x + dx)} ${GROUND}`], [t + S * 0.6, `${s(x + dx)} ${GROUND}`], [t + S * 0.92, `${x} ${GROUND}`])
+  }
+  // a shape that jumps in an arc from one spot to another over a peak
+  const arc = (shape: string, x1: number, y1: number, x2: number, y2: number, peak: number, t: number, d: number) =>
+    fly(shape, x1, y1, (x1 + x2) / 2, peak, t, d / 2) + fly(shape, (x1 + x2) / 2, peak, x2, y2, t + d / 2, d / 2)
   const shake = (id: string, t: number, d: number) => {
     const x = X[id]
     if (x === undefined) return
@@ -354,9 +376,87 @@ export const fightSvg = (b: Battle, looks: Record<string, ChaoLook>, from: Recor
         break
       case 'stuck':
         shake(e.actor, t, Math.min(0.5, S * 0.8))
-        fx.push(flash(`<g transform="translate(0,${GROUND - HIT_Y})">${use('wires')}</g>`, ax, HIT_Y, t, Math.max(0.5, S * 0.8)))
+        // an omochao held still is in a Bear Hug; a chao is tangled in wires
+        if (a?.side === 'foe') fx.push(flash(use('arms'), ax, up(16), t, Math.max(0.5, S * 0.8)))
+        else fx.push(flash(`<g transform="translate(0,${GROUND - HIT_Y})">${use('wires')}</g>`, ax, HIT_Y, t, Math.max(0.5, S * 0.8)))
+        break
+
+      // ---- temperament and animal moves
+      case 'glow':
+        // Warm Heart: a warm glow round the Hero, and a heart over everyone as their Regen starts
+        bump(e.actor, t, 0, -4)
+        fx.push(flash(`<circle r="13" fill="#ffd43b" opacity="0.22"/><circle r="9" fill="none" stroke="#ffe066" stroke-width="1"/>`, ax, up(16), t, Math.max(0.7, S * 1.2)))
+        tgts.forEach((id, k) => fx.push(rise(use('heart'), tx(id), up(34), tl - 0.1 + k * 0.06, 0.9)))
+        break
+      case 'rally':
+        // Rally: it raises a little pennant; everyone gets a plus and a » (moving sooner)
+        bump(e.actor, t, 0, -6)
+        fx.push(flash(use('pennant'), ax + 3, up(30), t, Math.max(0.7, S * 1.2)))
+        fx.push(rise(star4(3, '#ffd43b'), ax - 6, up(28), t + S * 0.1, 0.8), rise(star4(2.4, '#fff3bf'), ax + 8, up(25), t + S * 0.25, 0.8))
+        for (const id of tgts) fx.push(rise(use('plus'), tx(id), HIT_Y, tl, 0.6, -8), rise(txt('»', 7, '#ffe066'), tx(id) + 8, up(27), tl + 0.05, 0.6, -6))
+        break
+      case 'bite':
+        // Shadow Bite: dark jaws snap on the target; a flame if it crit and set it burning
+        lunge(e.actor, t, tx(t0))
+        fx.push(flash(use('jaws'), tx(t0), HIT_Y - 2, tl - 0.08, 0.36))
+        if (e.status === 'burn') fx.push(flash(use('flame'), tx(t0), HIT_Y + 4, tl + 0.15, 0.45))
+        break
+      case 'swipe':
+        // Swipe: three claw marks; a snatched trophy flies back to the raccoon with a twinkle
+        lunge(e.actor, t, tx(t0))
+        fx.push(flash(use('claws'), tx(t0), HIT_Y, tl - 0.05, 0.32))
+        if (e.snatch) {
+          fx.push(fly(`<g transform="scale(0.8)">${ITEM_ART[CORRUPTIONS[b.foe].drop] ?? ''}</g>`, tx(t0), up(30), ax, up(40), tl + 0.1, 0.55))
+          fx.push(rise(star4(2.6, '#ffd43b'), ax, up(40), tl + 0.65, 0.7))
+        }
+        break
+      case 'slide':
+        // Belly Slide: an icy streak along the ground into the target, with a splash
+        lunge(e.actor, t, tx(t0))
+        fx.push(fly(use('ice'), ax + 6 * dir, GROUND - 1, tx(t0) - 18 * dir, GROUND - 1, t, S * 0.4))
+        fx.push(flash(use('impact'), tx(t0), HIT_Y + 6, tl, 0.28))
+        fx.push(rise(use('drop'), tx(t0) - 5, GROUND - 4, tl, 0.5, -7), rise(use('drop'), tx(t0) + 4, GROUND - 3, tl + 0.05, 0.5, -9))
+        break
+      case 'hop':
+        // Hop Strike: a hop in, a kick, a little dust where it took off
+        leap(e.actor, t, tx(t0), 9)
+        fx.push(rise(`<g transform="scale(0.45)">${use('puff')}</g>`, ax, GROUND - 1, t + S * 0.05, 0.5, -3))
+        fx.push(flash(use('impact'), tx(t0), HIT_Y, tl, 0.28))
+        break
+      case 'pounce':
+        // Pounce: a high leap and a big slash
+        leap(e.actor, t, tx(t0), 15)
+        fx.push(flash(`<g transform="scale(1.3)">${use('slash')}</g>`, tx(t0), HIT_Y, tl - 0.05, 0.34))
+        fx.push(flash(`<g transform="scale(1.5)">${use('impact')}</g>`, tx(t0), HIT_Y, tl, 0.34))
+        break
+      case 'hug':
+        // Bear Hug: two big arms round the target and a heart
+        lunge(e.actor, t, tx(t0))
+        fx.push(flash(use('arms'), tx(t0), up(16), tl - 0.05, Math.max(0.6, S * 0.9)))
+        fx.push(rise(use('heart'), tx(t0) + 6, up(36), tl, 0.8))
+        break
+      case 'count':
+        // Counting Sheep: three little sheep jump over the target, then it nods off
+        bump(e.actor, t, 0, -3)
+        for (let k = 0; k < 3; k++) fx.push(arc(use('sheep'), ax + 10 * dir, GROUND - 1, tx(t0) + 16 * dir, GROUND - 1, 30, t + k * S * 0.22, Math.max(0.5, S * 0.75)))
+        if (e.status === 'sleep') fx.push(rise(use('zz'), tx(t0) + 4, up(40), tl + 0.2, 1))
+        break
+      case 'squawk':
+        // Squawk: sound rings from its beak, a plus over everyone
+        bump(e.actor, t, 0, -3)
+        for (let k = 0; k < 3; k++) fx.push(flash(`<g transform="scale(${1 + k * 0.45})">${use('wave')}</g>`, ax + (9 + k * 5) * dir, up(20), t + k * 0.1, 0.45))
+        for (const id of tgts) fx.push(rise(use('plus'), tx(id), HIT_Y, tl, 0.6, -8))
+        break
+      case 'ram':
+        // Charge: a heavy run in with dust behind and a big impact
+        lunge(e.actor, t, tx(t0))
+        fx.push(rise(`<g transform="scale(0.55)">${use('puff')}</g>`, ax - 6 * dir, GROUND - 1, t + S * 0.05, 0.6, -4), rise(`<g transform="scale(0.45)">${use('puff')}</g>`, ax + 4 * dir, GROUND - 1, t + S * 0.2, 0.6, -4))
+        fx.push(flash(`<g transform="scale(1.6)">${use('impact')}</g>`, tx(t0), HIT_Y, tl, 0.36))
         break
     }
+
+    // Mimic: rainbow rings round the copier as it does a teammate's move
+    if (e.mimic) fx.push(flash(use('mimic'), ax, up(16), t, Math.max(0.5, S * 0.7)))
 
     // numbers and blinks for each hit; several on one target are spread out
     const seen: Record<string, number> = {}

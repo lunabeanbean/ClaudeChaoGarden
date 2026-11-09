@@ -1,22 +1,23 @@
 import { classGear } from './gear'
-import type { ChaoLook, ChaoParts, ChaoType, ClassName, FruitColor, GardenLook, TreeKind, TreeLevel, TreeLook } from '../types'
+import type { ChaoLook, ChaoParts, ChaoType, ClassName, FruitColor, GardenLook, GardenView, TreeKind, TreeLevel, TreeLook } from '../types'
 
 // The chao garden: up to MAX_CHAO chao living in the band, growing from what happens in chats.
 // Saved in $.store: 'garden' holds the garden-wide record and each chao has its own key 'chao:<id>',
 // so two open chats rarely overwrite each other.
 
 export const MAX_CHAO = 8
-// Every new chat grows a fresh tree; each message gives the hungriest chao a snack from it (+1 Stamina) while
-// snacks are left. (The coloured fruit that grow the stats are ripened by Claude's work: see "Fruit" below.)
+// One tree for the whole garden, whatever chat you are in: each message gives the hungriest chao a snack from it
+// (+1 Stamina) while snacks are left; once it is full grown and bare, a new seed is planted. (The coloured fruit that
+// grow the stats are ripened by Claude's work: see "Fruit" below.)
 export const TREE_FRUITS = 12
 // An egg hatches after this many messages, or this long after it was laid, whichever comes first.
-const HATCH_WARMTH = 8
-const HATCH_TIME = 2 * 60 * 60 * 1000
+export const HATCH_WARMTH = 8
+export const HATCH_TIME = 2 * 60 * 60 * 1000
 // The life cycle runs on garden days (days you open a chat). A baby becomes a child a third of the
 // way through its first chao year (or once well fed); at one chao year a child that has eaten enough
 // makes its cocoon, which opens after COCOON_TIME or when a new chat opens.
-const CHILD_FOOD = 60
-const COCOON_FOOD = 50
+export const CHILD_FOOD = 60
+export const COCOON_FOOD = 50
 const COCOON_TIME = 30 * 60 * 1000
 // Garden days per chao year: /chao pace slow|normal|fast.
 export const PACES = { slow: 5, normal: 3, fast: 1 } as const
@@ -113,6 +114,9 @@ export type ChaoSave = {
   compass: Compass
   stats: ChaoStats
   parts: ChaoParts
+  // how many times each animal was given to it (from 1.6.0; older chao start empty, and an animal it wears counts as
+  // given at least once). Given STACK_AT times while one of its pieces is still worn, the animal's skill is on.
+  gifts: Record<string, number>
   // the class it found as an adult (from its strongest class stat) and the seed its gear colours come from
   cls?: { main: ClassName; seed: number }
   // coloured fruit eaten (its two favourites are its two most eaten), and the garden turn it last had one
@@ -125,6 +129,10 @@ export type GardenSave = {
   // the chao that gets Claude's training and the animals from bubbles
   chosen: string
   show: boolean
+  // which garden the band shows (/chao visit); older saves have none and show the Neutral one
+  view?: GardenView
+  // the chao wearing the gold medal from the last race (/chao race); none before the first race with two or more
+  champ?: string
   days: number
   lastDay: string
   lastSeen: number
@@ -141,8 +149,14 @@ export type GardenSave = {
   lastMeal: [Color, string][]
 }
 
+// The one tree, shared by every chat (store key 'tree', apart from 'garden' so chats still on older code never write
+// over it): `grown` counts your messages since it was planted (in any chat), `snacks` are left on it, `kind` settles
+// when it is full grown, and `work` is Claude's work in fruit (work / meter per colour) since it was planted, which
+// decides that kind. `n` counts the trees.
+export type TreeSave = { n: number; grown: number; snacks: number; kind: TreeKind; work: Record<Color, number> }
+
 // The whole garden while one event changes it.
-export type Garden = { g: GardenSave; chao: ChaoSave[] }
+export type Garden = { g: GardenSave; chao: ChaoSave[]; tree: TreeSave }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 
@@ -170,6 +184,7 @@ export const freshChao = (id: string, now: number): ChaoSave => ({
   compass: { swimFly: 0, runPower: 0 },
   stats: { swim: 0, fly: 0, run: 0, power: 0, stamina: 0 },
   parts: {},
+  gifts: {},
   ate: noColor(),
   lastFruit: 0,
 })
@@ -178,6 +193,12 @@ const num = (v: unknown, fallback: number) => (typeof v === 'number' && Number.i
 const colorRecord = (v: unknown, fallback: Record<Color, number>): Record<Color, number> => {
   const o = v && typeof v === 'object' ? (v as Record<string, unknown>) : {}
   return { power: num(o.power, fallback.power), swim: num(o.swim, fallback.swim), run: num(o.run, fallback.run), fly: num(o.fly, fallback.fly) }
+}
+// Times each animal was given: whole numbers of 0 or more; anything else is dropped.
+const giftRecord = (v: unknown): Record<string, number> => {
+  const out: Record<string, number> = {}
+  if (v && typeof v === 'object') for (const [k, n] of Object.entries(v as Record<string, unknown>)) if (typeof n === 'number' && Number.isFinite(n) && n > 0) out[k] = Math.floor(n)
+  return out
 }
 
 // Fills in anything an older save lacks. Saves from before the life cycle have no stage: nobody had
@@ -196,6 +217,7 @@ export const normalizeChao = (v: unknown, id: string, now: number, gardenDays = 
     stats: { ...f.stats, ...(o.stats ?? {}) },
     compass: { ...f.compass, ...(o.compass ?? {}) },
     parts: { ...(o.parts ?? {}) },
+    gifts: giftRecord(o.gifts),
     ate: colorRecord(o.ate, noColor()),
     lastFruit: num(o.lastFruit, turns),
   }
@@ -237,6 +259,7 @@ export const normalizeGarden = (v: unknown, now: number): GardenSave => {
     ...f,
     ...o,
     ids: Array.isArray(o.ids) ? o.ids.map(String) : [],
+    view: o.view === 'dark' || o.view === 'light' ? o.view : 'neutral',
     pace: o.pace && o.pace in PACES ? o.pace : 'normal',
     ripe: colorRecord(o.ripe, f.ripe),
     ready: Array.isArray(o.ready) ? o.ready.filter(isColor).slice(0, READY_MAX) : [],
@@ -247,7 +270,7 @@ export const normalizeGarden = (v: unknown, now: number): GardenSave => {
   }
 }
 
-const eatenOf = (c: ChaoSave) => FRUIT_COLORS.reduce((a, k) => a + (c.ate?.[k] ?? 0), 0)
+export const eatenOf = (c: ChaoSave) => FRUIT_COLORS.reduce((a, k) => a + (c.ate?.[k] ?? 0), 0)
 
 // Food so far, for growing up: snacks, treats, pets, animals, coloured fruit (and the old tool runs, which no longer rise).
 export const growth = (c: ChaoSave) => c.messages + c.treats * 3 + c.pets + c.animals * 3 + Math.floor(c.tools / 3) + eatenOf(c)
@@ -302,7 +325,7 @@ export const freeNames = (gd: Garden, n: number) => {
 }
 
 // Hatched and awake: eggs and cocoons don't eat or train.
-const active = (c: ChaoSave) => c.stage === 'baby' || c.stage === 'child' || c.stage === 'adult'
+export const active = (c: ChaoSave) => c.stage === 'baby' || c.stage === 'child' || c.stage === 'adult'
 
 const hatch = (gd: Garden, c: ChaoSave) => {
   c.stage = 'baby'
@@ -399,11 +422,182 @@ export const classLines = (c: ChaoSave): string[] => {
   if (second) {
     const sc = CLASSES[second]
     const slv = level(c.stats[sc.stat])
-    out.push(`Second class: ${sc.name} Lv ${slv} · extra skill: ${sc.skills.find(([need]) => slv >= need)?.[1] ?? 'none yet'}`)
+    // the best one it has unlocked: the one fights lend it
+    out.push(`Second class: ${sc.name} Lv ${slv} · extra skill: ${sc.skills.filter(([need]) => slv >= need).slice(-1)[0]?.[1] ?? 'none yet'}`)
   }
   const pass = (Object.keys(PASSIVES) as (keyof ChaoStats)[]).filter(k => level(c.stats[k]) >= 5 && !(k === cl.stat)).map(k => PASSIVES[k])
   if (pass.length) out.push(`Passives: ${pass.join(', ')}`)
   return out
+}
+
+// ---- Traits: temperament and animals ----
+// Two more sources of fight passives and skills, apart from the four stats its class comes from: its temperament
+// (Hero, Dark or Neutral) and the animal pieces it wears. Nothing here is rolled: all of it follows from what the card
+// shows. The numbers the fights use sit beside the words the card says (battle.ts reads both from here).
+
+export type Temperament = ChaoLook['kind']
+export type Trait = { name: string; text: string }
+
+// The temperament is the Hero / Dark / Neutral it shows: an adult's (and a cocoon's) was fixed when it made its cocoon,
+// a baby's or child's follows its lean until then. How strong it is comes from its lean now (`align`, on the card, still
+// moving with when you chat and pet): a Hero at +60 or more, a Dark at -60 or less, or a Neutral within 15 of zero also
+// knows its signature skill.
+export const STRONG_LEAN = 60
+export const CALM_LEAN = 15
+export const temperamentOf = (c: ChaoSave): Temperament => (c.stage === 'adult' || c.stage === 'cocoon' ? (c.kind ?? 'neutral') : leaning(c.align))
+export const strongLean = (c: ChaoSave) => {
+  const t = temperamentOf(c)
+  return t === 'hero' ? c.align >= STRONG_LEAN : t === 'dark' ? c.align <= -STRONG_LEAN : Math.abs(c.align) <= CALM_LEAN
+}
+
+export const TEMPERAMENTS: Record<Temperament, { icon: string; name: string; passive: Trait; skill: Trait; need: string }> = {
+  hero: {
+    icon: '☀',
+    name: 'Hero',
+    passive: { name: 'Warm Heart', text: 'the whole team starts each fight with Regen' },
+    skill: { name: 'Rally', text: 'heals the team a little, clears bad effects and gets everyone moving sooner' },
+    need: `a lean of +${STRONG_LEAN} or more`,
+  },
+  dark: {
+    icon: '☾',
+    name: 'Dark',
+    passive: { name: 'Sharp Edge', text: '+10% crit chance' },
+    skill: { name: 'Shadow Bite', text: 'a shadowy bite that crits easily, and a critical bite sets the omochao burning' },
+    need: `a lean of -${STRONG_LEAN} or less`,
+  },
+  neutral: {
+    icon: '✦',
+    name: 'Neutral',
+    passive: { name: 'Adaptable', text: 'after its first hit from the omochao (or from a bug), it takes 10% less from that one' },
+    skill: { name: 'Mimic', text: 'copies the last special move a teammate used, even a Meteor' },
+    need: `a lean between -${CALM_LEAN} and +${CALM_LEAN}`,
+  },
+}
+
+// Animals in fights. One piece worn gives its small buff, two pieces worn its passive, and once that animal has been
+// given STACK_AT times its skill too, as long as at least one of its pieces is still on. A new animal's piece can push an
+// old one off (and ears and horns push each other off), so what a chao knows changes with what it wears.
+// `buff` is what fights add: hp, atk and heal are fractions (0.08 = +8%), def and spd points, crit and dodge percent.
+export const STACK_AT = 3
+export type Buff = Partial<Record<'hp' | 'atk' | 'heal' | 'def' | 'spd' | 'crit' | 'dodge', number>>
+export const ANIMAL_TRAITS: Record<string, { name: string; buff: Trait & { add: Buff }; passive: Trait; skill: Trait }> = {
+  raccoon: {
+    name: 'Raccoon',
+    buff: { name: 'Slippery', text: '+4% dodge', add: { dodge: 4 } },
+    passive: { name: 'Sneaky', text: 'after it dodges, it gets its next move sooner' },
+    skill: { name: 'Swipe', text: 'a quick paw that may snatch an extra trophy' },
+  },
+  penguin: {
+    name: 'Penguin',
+    buff: { name: 'Sturdy', text: '+1 defence', add: { def: 1 } },
+    passive: { name: 'Thick Down', text: "takes 15% less from the omochao's big wound-up move" },
+    skill: { name: 'Belly Slide', text: 'slides into the omochao and slows it' },
+  },
+  rabbit: {
+    name: 'Rabbit',
+    buff: { name: 'Springy', text: '+2 speed', add: { spd: 2 } },
+    passive: { name: 'Head Start', text: 'starts each fight half way to its first move' },
+    skill: { name: 'Hop Strike', text: 'a quick hop and kick that gets its next move sooner' },
+  },
+  bear: {
+    name: 'Bear',
+    buff: { name: 'Big Hearted', text: '+8% HP', add: { hp: 0.08 } },
+    passive: { name: 'Second Wind', text: 'once a fight, when under a third of its HP, it gets Regen' },
+    skill: { name: 'Bear Hug', text: 'a squeeze that holds the omochao still for a turn' },
+  },
+  tiger: {
+    name: 'Tiger',
+    buff: { name: 'Keen Eye', text: '+5% crit chance', add: { crit: 5 } },
+    passive: { name: 'Finisher', text: 'hits 15% harder on a foe under half its HP' },
+    skill: { name: 'Pounce', text: 'a big leap: 1.6x damage' },
+  },
+  sheep: {
+    name: 'Sheep',
+    buff: { name: 'Fluffy', text: '+4% HP and +1 defence', add: { hp: 0.04, def: 1 } },
+    passive: { name: 'Woolly Coat', text: 'bad effects on it wear off a turn sooner' },
+    skill: { name: 'Counting Sheep', text: 'sends the omochao to sleep for a turn' },
+  },
+  parrot: {
+    name: 'Parrot',
+    buff: { name: 'Sweet Voice', text: '+12% healing', add: { heal: 0.12 } },
+    passive: { name: 'Bright Song', text: "while it is still up, the whole team's heals are 15% bigger" },
+    skill: { name: 'Squawk', text: 'a cheerful squawk that heals the team a little' },
+  },
+  boar: {
+    name: 'Boar',
+    buff: { name: 'Brawny', text: '+8% attack', add: { atk: 0.08 } },
+    passive: { name: 'Tusks', text: 'an omochao or bug that hits it takes a little damage back' },
+    skill: { name: 'Charge', text: 'a heavy run that goes straight through defence' },
+  },
+}
+
+const SPOTS: (keyof ChaoParts)[] = ['tail', 'ears', 'horns', 'forehead', 'face', 'feet']
+
+// What each worn animal does for it: the spots it covers, how many times that animal was given, and which tiers are on.
+export type AnimalTier = { animal: string; spots: (keyof ChaoParts)[]; given: number; buff: boolean; passive: boolean; skill: boolean }
+export const animalTiers = (c: ChaoSave): AnimalTier[] => {
+  const by: Record<string, (keyof ChaoParts)[]> = {}
+  for (const spot of SPOTS) {
+    const a = c.parts?.[spot]
+    if (a && ANIMAL_TRAITS[a]) (by[a] ??= []).push(spot)
+  }
+  return Object.entries(by)
+    .map(([animal, spots]) => {
+      const given = Math.max(c.gifts?.[animal] ?? 0, 1)
+      return { animal, spots, given, buff: true, passive: spots.length >= 2, skill: given >= STACK_AT }
+    })
+    .sort((a, b) => b.spots.length - a.spots.length || b.given - a.given || a.animal.localeCompare(b.animal))
+}
+
+// Everything a chao brings to a fight beyond its class: its temperament, whether its lean is strong, the passives and
+// skills it has from both, and the buffs from what it wears.
+export const traitsOf = (c: ChaoSave) => {
+  const temper = temperamentOf(c)
+  const strong = strongLean(c)
+  const animals = animalTiers(c)
+  const T = TEMPERAMENTS[temper]
+  return {
+    temper,
+    strong,
+    animals,
+    passives: [T.passive.name, ...animals.filter(a => a.passive).map(a => ANIMAL_TRAITS[a.animal]!.passive.name)],
+    skills: [...(strong ? [T.skill.name] : []), ...animals.filter(a => a.skill).map(a => ANIMAL_TRAITS[a.animal]!.skill.name)],
+    buffs: animals.map(a => ANIMAL_TRAITS[a.animal]!.buff.add),
+  }
+}
+
+const signed = (n: number) => `${n > 0 ? '+' : ''}${n}`
+
+// The card's lines for its temperament and animals: what is on now, and what it is still short of.
+export const traitLines = (c: ChaoSave): string[] => {
+  const t = traitsOf(c)
+  const T = TEMPERAMENTS[t.temper]
+  const young = c.stage === 'baby' || c.stage === 'child'
+  const out = [
+    `${T.icon} Temperament: ${T.name} (lean ${signed(c.align)}${young ? ', it follows the lean until its cocoon' : ''}) · ${T.passive.name} (passive): ${T.passive.text}`,
+    `   ${T.skill.name} (skill, at ${T.need}): ${t.strong ? `${T.skill.text} ✓` : `not yet, lean now ${signed(c.align)}`}`,
+  ]
+  for (const a of t.animals) {
+    const A = ANIMAL_TRAITS[a.animal]!
+    const emoji = ANIMALS[a.animal]?.emoji ?? ''
+    const parts = [
+      `${A.buff.name}: ${A.buff.text}`,
+      a.passive ? `${A.passive.name} (passive): ${A.passive.text}` : `${A.passive.name} (passive) at 2 pieces worn`,
+      a.skill ? `${A.skill.name} (skill): ${A.skill.text}` : `${A.skill.name} (skill) once given ${STACK_AT} times`,
+    ]
+    out.push(`${emoji} ${A.name}: wears ${a.spots.join(' and ')}, given ${a.given} time${a.given === 1 ? '' : 's'} · ${parts.join(' · ')}`)
+  }
+  const worn = new Set(t.animals.map(a => a.animal))
+  const gone = Object.entries(c.gifts ?? {}).filter(([a, n]) => n > 0 && !worn.has(a) && ANIMALS[a])
+  if (gone.length) out.push(`   Given before, no piece worn now (no effect until one is): ${gone.map(([a, n]) => `${ANIMALS[a]!.emoji} ${a} ×${n}`).join(', ')}`)
+  return out
+}
+
+// "☀ Rally · 🐯 Pounce": the trait skills it knows, for its line in the garden list.
+export const traitSkillTags = (c: ChaoSave): string => {
+  const t = traitsOf(c)
+  const tags = [...(t.strong ? [`${TEMPERAMENTS[t.temper].icon} ${TEMPERAMENTS[t.temper].skill.name}`] : []), ...t.animals.filter(a => a.skill).map(a => `${ANIMALS[a.animal]?.emoji ?? ''} ${ANIMAL_TRAITS[a.animal]!.skill.name}`)]
+  return tags.join(' · ')
 }
 
 // Lays a new egg if there is room; returns it.
@@ -418,7 +612,7 @@ export const layEgg = (gd: Garden, now: number): ChaoSave | undefined => {
 
 // A brand-new garden: two eggs to start.
 export const newGarden = (now: number): Garden => {
-  const gd: Garden = { g: freshGarden(now), chao: [] }
+  const gd: Garden = { g: freshGarden(now), chao: [], tree: newTree() }
   layEgg(gd, now)
   layEgg(gd, now)
   return gd
@@ -436,7 +630,7 @@ export const trainee = (gd: Garden) => {
 }
 
 // The first hatched chao in garden order: a steady one for the garden card.
-const firstActive = (gd: Garden) => gd.g.ids.map(id => gd.chao.find(o => o.id === id)).find(c => c && active(c))
+export const firstActive = (gd: Garden) => gd.g.ids.map(id => gd.chao.find(o => o.id === id)).find(c => c && active(c))
 
 export const byName = (gd: Garden, name: string) => gd.chao.find(c => c.hatched && c.name.toLowerCase() === name.trim().toLowerCase())
 
@@ -500,7 +694,7 @@ export const message = (gd: Garden, now: number, pictures: boolean, fruitLeft: b
 
 // ---- Fruit ----
 // Claude's work ripens coloured fruit (knobs at the top of this file); at the end of each of Claude's turns every ripe fruit is
-// eaten by a picky chao, and the fruit's recipe (by this chat's tree) gives its stats. Tool runs give no stats.
+// eaten by a picky chao, and the fruit's recipe (by the tree's kind) gives its stats. Tool runs give no stats.
 export const FRUIT: Record<Color, { emoji: string; fill: string; edge: string; leaf: string; leafEdge: string; work: string }> = {
   power: { emoji: '🔴', fill: '#ff6b6b', edge: '#d94848', leaf: '#ffc4c4', leafEdge: '#e58e8e', work: 'commands' },
   swim: { emoji: '🔵', fill: '#74c0fc', edge: '#4a94d4', leaf: '#bde0fd', leafEdge: '#7fb3de', work: 'reads' },
@@ -634,7 +828,7 @@ export const morningBasket = (gd: Garden) => {
   for (const k of FRUIT_COLORS) if (gd.g.ready.length < READY_MAX) gd.g.ready.push(k)
 }
 
-// This chat's tree kind, from its work in fruit (work / meter per colour).
+// The tree's kind, from Claude's work in fruit while it grew (work / meter per colour).
 export const treeKindOf = (chatWork: Partial<Record<Color, number>>): TreeKind => {
   const r = FRUIT_COLORS.map(k => [k, Math.max(0, chatWork[k] ?? 0)] as [Color, number]).sort((a, b) => b[1] - a[1])
   const [first, second] = r as [[Color, number], [Color, number]]
@@ -672,6 +866,7 @@ export const giveAnimal = (c: ChaoSave, animal: string) => {
   const a = ANIMALS[animal]
   if (!a) return
   c.animals++
+  c.gifts = { ...(c.gifts ?? {}), [animal]: (c.gifts?.[animal] ?? 0) + 1 }
   for (const [k, v] of Object.entries(a.stats)) c.stats[k as keyof ChaoStats] += v ?? 0
   const parts: ChaoParts = { ...c.parts, ...(a.parts ?? {}) }
   if (a.pick?.length) {
@@ -720,32 +915,84 @@ export const lookOf = (c: ChaoSave, perYear: number): ChaoLook => {
   return look
 }
 
+// ---- The shared tree ----
+export const newTree = (n = 1): TreeSave => ({ n, grown: 0, snacks: TREE_FRUITS, kind: { kind: '' }, work: noColor() })
+
+const KINDS_OF_TREE = ['', 'plain', 'twin', 'rainbow']
+export const normalizeTree = (v: unknown): TreeSave => {
+  const f = newTree()
+  if (!v || typeof v !== 'object') return f
+  const o = v as Partial<TreeSave>
+  const isColor = (x: unknown): x is Color => typeof x === 'string' && (FRUIT_COLORS as string[]).includes(x)
+  const k = o.kind && typeof o.kind === 'object' && KINDS_OF_TREE.includes(String(o.kind.kind)) ? o.kind : { kind: '' as const }
+  const kind: TreeKind = { kind: k.kind }
+  if (isColor(k.a)) kind.a = k.a
+  if (isColor(k.b)) kind.b = k.b
+  return {
+    n: Math.max(1, num(o.n, 1)),
+    grown: Math.max(0, num(o.grown, 0)),
+    snacks: clamp(num(o.snacks, TREE_FRUITS), 0, TREE_FRUITS),
+    kind,
+    work: colorRecord(o.work, f.work),
+  }
+}
+
+// One of your messages (any chat): the tree grows, and the message that makes it full grown settles its kind from
+// Claude's work since it was planted. Returns whether a snack was left for the hungriest chao (it takes one).
+export const growTree = (gd: Garden): boolean => {
+  const t = gd.tree
+  t.grown++
+  if (t.grown >= TREE_GROWN && t.kind.kind === '') t.kind = treeKindOf(t.work)
+  return t.snacks > 0
+}
+
+// Claude's work goes into the tree's kind while it is still growing.
+export const treeWork = (gd: Garden, color: Color, amount: number, meter: number) => {
+  const t = gd.tree
+  if (t.kind.kind !== '' || !(amount > 0) || !(meter > 0)) return
+  t.work[color] = tidy(t.work[color] + amount / meter)
+}
+
+// At the end of Claude's turn: a full-grown tree with no snacks left goes, and a new seed is planted.
+export const replantTree = (gd: Garden): boolean => {
+  if (gd.tree.grown < TREE_GROWN || gd.tree.snacks > 0) return false
+  gd.tree = newTree(gd.tree.n + 1)
+  return true
+}
+
 export const treeLevel = (fruits: number): TreeLevel => (fruits >= 5 ? 'full' : fruits > 0 ? 'half' : 'bare')
 
-// The tree is full grown from this many of your messages in a chat; its kind settles then.
+// The tree is full grown from this many of your messages (in any chat); its kind settles then.
 export const TREE_GROWN = 7
 
-// The tree grows with the messages sent in this chat: seed, sprout, sapling, young tree with blossoms,
+// The tree grows with your messages, in any chat: seed, sprout, sapling, young tree with blossoms,
 // then the full tree (paler once its snacks are gone).
 export const treeStage = (grown: number, fruits: number): TreeLevel =>
   grown < 1 ? 'seed' : grown < 3 ? 'sprout' : grown < 5 ? 'sapling' : grown < TREE_GROWN ? 'young' : treeLevel(fruits)
 
-export const EMPTY_GARDEN: GardenLook = { show: true, tree: 'full', chao: [] }
+export const EMPTY_GARDEN: GardenLook = { show: true, view: 'neutral', tree: 'full', chao: [] }
 
 // The band's look. Unless `mood` is set (a new chat, petting, a new pace), each chao keeps the look it
 // showed, apart from its name and animal parts, so the band doesn't redraw on every message or tool run;
 // a new stage always shows at once.
 export const gardenLook = (gd: Garden, tree: TreeLevel, old: GardenLook, mood: boolean): GardenLook => ({
   show: gd.g.show,
+  view: gd.g.view === 'dark' || gd.g.view === 'light' ? gd.g.view : 'neutral',
   tree,
   chao: gd.g.ids.flatMap(id => {
     const c = gd.chao.find(o => o.id === id)
     if (!c) return []
     const fresh = lookOf(c, PACES[gd.g.pace])
+    // the gold medal from the last race shows at once, like a new name or animal part (not on an egg or cocoon)
+    if (gd.g.champ === id && fresh.stage !== 'egg' && fresh.stage !== 'cocoon') fresh.medal = true
     const prev = old.chao.find(o => o.id === id)
     // finding a class shows at once; a better tier of gear waits for the next chat like the rest of a look
     const foundClass = !!fresh.cls !== !!prev?.cls
-    return [mood || !prev || prev.stage !== fresh.stage || foundClass ? fresh : { ...prev, name: fresh.name, parts: fresh.parts }]
+    if (mood || !prev || prev.stage !== fresh.stage || foundClass) return [fresh]
+    const kept: ChaoLook = { ...prev, name: fresh.name, parts: fresh.parts }
+    if (fresh.medal) kept.medal = true
+    else delete kept.medal
+    return [kept]
   }),
 })
 
@@ -764,7 +1011,7 @@ const hearts = (h: number) => {
   return `${'♥'.repeat(n)}${'♡'.repeat(5 - n)}`
 }
 
-const stageName = (c: ChaoSave) => {
+export const stageName = (c: ChaoSave) => {
   if (c.stage === 'adult') {
     const second = secondOf(c)
     return `${formName(c)} adult${second ? ` with a touch of ${TYPE_NAME[second]}` : ''}`
@@ -775,7 +1022,7 @@ const stageName = (c: ChaoSave) => {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 // What comes next in its life, in a line.
-const nextStep = (gd: Garden, c: ChaoSave, now: number) => {
+export const nextStep = (gd: Garden, c: ChaoSave, now: number) => {
   const perYear = PACES[gd.g.pace]
   const food = growth(c)
   if (c.stage === 'baby') {
@@ -806,11 +1053,11 @@ const favouriteLine = (c: ChaoSave) => {
   return `Favourite fruit: ${fruitName(a)} and ${fruitName(b)} (${c.ate[a]} and ${c.ate[b]} eaten)`
 }
 
-// "This chat's tree: twin (🔵 Swim + 🟢 Run)", or "still growing" before it is full grown.
+// "The tree: twin (🔵 Swim + 🟢 Run)", or "still growing" before it is full grown.
 export const treeLine = (t: TreeKind) =>
-  `This chat's tree: ${
+  `The tree: ${
     t.kind === ''
-      ? 'still growing (its kind settles when it is full grown, from the work in this chat)'
+      ? "still growing (its kind settles when it is full grown, from Claude's work while it grows)"
       : t.kind === 'twin' && t.a && t.b
         ? `twin (${fruitName(t.a)} + ${fruitName(t.b)})`
         : t.kind === 'plain'
@@ -840,9 +1087,10 @@ export const card =(gd: Garden, c: ChaoSave, now: number) => {
     favouriteLine(c),
     `Ate ${FRUIT_COLORS.map(k => `${FRUIT[k].emoji} ${c.ate[k]}`).join(' ')} fruit, ${plural(c.messages, 'snack')} and ${plural(c.treats, 'treat')} · ${c.animals} animals · ${c.chats} chats · ${c.pets} pets`,
   ]
-  const parts = Object.entries(c.parts).map(([spot, animal]) => `${animal} ${spot}`)
-  if (parts.length) lines.push(`Wearing: ${parts.join(', ')}`)
+  if (gd.g.champ === c.id) lines.push('🥇 Wears the gold medal: it won the last race (/chao race)')
   lines.push(...classLines(c))
+  // its temperament and each animal it wears, with what each gives in fights
+  lines.push(...traitLines(c))
   if (c.stage === 'baby' || c.stage === 'child') {
     const second = secondOf(c)
     lines.push(`Leaning: ${KIND_NAME[leaning(c.align)]} (${c.align > 0 ? '+' : ''}${c.align}), type ${TYPE_NAME[typeOf(c)]}${second ? ` with a touch of ${TYPE_NAME[second]}` : ''}`)
@@ -853,12 +1101,13 @@ export const card =(gd: Garden, c: ChaoSave, now: number) => {
 }
 
 // The garden at a glance: the fruit, one line per chao, then the first one's card.
-export const gardenCard = (gd: Garden, fruits: number, now: number, tree: TreeKind = { kind: '' }) => {
+export const gardenCard = (gd: Garden, now: number) => {
   const g = gd.g
+  const t = gd.tree
   const nameOf = (id: string) => gd.chao.find(o => o.id === id)?.name || 'a chao'
   const lines = [
-    `✦ Chao garden: ${gd.chao.length} of ${MAX_CHAO} · garden day ${g.days} · pace ${g.pace} (1 chao year = ${plural(PACES[g.pace], 'garden day')}) · ${plural(Math.max(0, fruits), 'snack')} left on this chat's tree`,
-    treeLine(tree),
+    `${g.view === 'dark' ? '☾ Dark garden (the moonlit wood)' : g.view === 'light' ? '☀ Light garden (the sunset meadow)' : '✦ Chao garden'}: ${gd.chao.length} of ${MAX_CHAO} · garden day ${g.days} · pace ${g.pace} (1 chao year = ${plural(PACES[g.pace], 'garden day')}) · ${t.grown < TREE_GROWN ? `the tree is growing (${t.grown} of ${TREE_GROWN} messages)` : t.snacks > 0 ? `${plural(t.snacks, 'snack')} left on the tree` : 'the tree is bare: a new seed after this turn'}`,
+    treeLine(t.kind),
     ripeningLine(g),
   ]
   if (g.ready.length) lines.push(`Ripe and waiting for the end of Claude's turn: ${g.ready.map(k => FRUIT[k].emoji).join(' ')}`)
@@ -872,7 +1121,8 @@ export const gardenCard = (gd: Garden, fruits: number, now: number, tree: TreeKi
       const second = c.stage === 'adult' ? undefined : secondOf(c)
       const type = c.stage === 'adult' ? '' : ` · type ${TYPE_NAME[typeOf(c)]}${second ? ` + ${TYPE_NAME[second]}` : ''}`
       const favs = eatenOf(c) < TASTING ? ' · tasting everything' : ` · likes ${favourites(c).map(k => FRUIT[k].emoji).join('')}`
-      lines.push(`   ${c.name} · ${stageName(c)} · ${hearts(c.happiness)}${type}${favs}`)
+      const tags = traitSkillTags(c)
+      lines.push(`   ${c.name}${g.champ === c.id ? ' 🥇' : ''} · ${stageName(c)} · ${hearts(c.happiness)}${type}${favs}${tags ? ` · ${tags}` : ''}`)
     }
   }
   const shown = firstActive(gd)
@@ -1215,6 +1465,13 @@ const leftHand = (look: ChaoLook, p: Palette, f: Features) => {
   return `<g stroke="${p.edge}" stroke-width="0.8"><ellipse cx="-4.6" cy="-6.2" rx="${rx}" ry="${ry}" fill="${hand}"/></g>`
 }
 
+// The gold medal the last race's winner wears on a ribbon round its neck, with a glint now and then.
+const MEDAL_ART =
+  `<path d="M-1.6,-9.6 L0.9,-5.6 M3.8,-9.6 L1.5,-5.6" stroke="#ff5a7a" stroke-width="1.3" stroke-linecap="round"/>` +
+  `<circle cx="1.2" cy="-4.3" r="2.2" fill="#ffd43b" stroke="#b8860b" stroke-width="0.5"/>` +
+  `<path d="M1.2,-5.6 L1.6,-4.7 L2.5,-4.6 L1.8,-4 L2,-3.1 L1.2,-3.6 L0.4,-3.1 L0.6,-4 L-0.1,-4.6 L0.8,-4.7 Z" fill="#fff3bf"/>` +
+  `<circle cx="0.3" cy="-5.1" r="0.5" fill="#ffffff" opacity="0"><animate attributeName="opacity" values="0;1;0;0" keyTimes="0;0.1;0.2;1" dur="2.6s" repeatCount="indefinite"/></circle>`
+
 const LAYERS: Layer[] = [
   look => tailPart(look.parts?.tail),
   look => (look.cls ? classGear(look.cls).back : ''),
@@ -1224,6 +1481,7 @@ const LAYERS: Layer[] = [
   look => feetPart(look.parts?.feet) + foreheadPart(look.parts?.forehead),
   look => (look.cls ? classGear(look.cls).off : ''),
   (look, p, f) => leftHand(look, p, f),
+  look => (look.medal ? MEDAL_ART : ''),
   look => facePart(look.parts?.face),
   // eyes, cheeks and smile; on a raccoon mask's white patches the eyes stay dark, whatever the body
   (look, p) =>
@@ -1243,6 +1501,8 @@ const SIZE = { egg: 1, baby: 0.75, child: 0.88, cocoon: 1, adult: 1 }
 
 // A child grows from baby size to almost adult size over its year.
 const sizeOf = (look: ChaoLook) => (look.stage === 'child' ? Math.round((0.8 + 0.06 * (look.grow ?? 1)) * 100) / 100 : SIZE[look.stage])
+// How big a chao's art is drawn against an adult's (for pieces added around it, such as the race's glide wings).
+export const chaoSize = (look: ChaoLook) => sizeOf(look)
 
 const chaoSleepy = (look: ChaoLook, p: Palette, dur: number, times: string, values: string, begin: number) => {
   // With a mask the closed eyes sit on the mask, not on the body colour.

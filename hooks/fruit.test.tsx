@@ -14,7 +14,7 @@ const garden = (ids: string[], extra: Record<string, unknown> = {}) => ({
   ids, chosen: ids[0], show: true, days: 10, lastDay: '2026-11-2', lastSeen: DAY - 1000, nextId: 9, pace: 'normal', ...extra,
 })
 // fights off, so no omochao gets in the way of these tests
-const ONE = { garden: garden(['c1']), 'chao:c1': baby('c1', 'Mochi'), battle: { off: true } }
+const ONE = { garden: garden(['c1']), 'chao:c1': baby('c1', 'Mochi'), battle: { off: true }, race: { off: true } }
 
 const start = async ($: any, on: any, store: Record<string, unknown>) => {
   const clock = mock.clock(on, { now: DAY })
@@ -98,6 +98,7 @@ test('each chao gets its own fruit: picky eaters keep apart and the babies taste
     'chao:c2': baby('c2', 'Kiki', { stage: 'child', ate: { power: 6, swim: 0, run: 5, fly: 0 } }),
     'chao:c3': baby('c3', 'Sugar'),
     battle: { off: true },
+    race: { off: true },
   }
   const { clock } = await start($, on, store)
   let t = await card($)
@@ -117,30 +118,31 @@ test('each chao gets its own fruit: picky eaters keep apart and the babies taste
   expect(t).not.toContain('🔵 to Kiki')
 })
 
-test('the tree kind settles once, when the tree is full grown, from the work in this chat', async ($, on) => {
+test("the tree kind settles once, when the tree is full grown, from Claude's work while it grew", async ($, on) => {
   const { band } = await start($, on, ONE)
-  expect(await card($)).toContain("This chat's tree: still growing")
+  expect(await card($)).toContain('The tree: still growing')
   // as much red work as blue: a twin tree
   for (let i = 0; i < 16; i++) await bash($)
   for (let i = 0; i < 10; i++) await readFile($)
   for (let i = 0; i < 6; i++) await $.prompt.submit({ text: `hello ${i}` })
-  expect(await card($)).toContain("This chat's tree: still growing")
+  expect(await card($)).toContain('The tree: still growing')
   await $.prompt.submit({ text: 'seven' })
   let t = await card($)
   console.log(t.split('\n').slice(0, 3).join('\n'))
-  expect(t).toContain("This chat's tree: twin (🔴 Power + 🔵 Swim)")
+  expect(t).toContain('The tree: twin (🔴 Power + 🔵 Swim)')
   expect(await pic(band, 'tree')).toContain('twpowerswim')
   // more work and messages later don't change it
   for (let i = 0; i < 30; i++) await edit($)
   for (let i = 0; i < 3; i++) await $.prompt.submit({ text: `more ${i}` })
   t = await card($)
-  expect(t).toContain("This chat's tree: twin (🔴 Power + 🔵 Swim)")
+  expect(t).toContain('The tree: twin (🔴 Power + 🔵 Swim)')
 })
 
-test('a new chat starts its tree afresh, and the first chat of the day brings a morning basket', async ($, on) => {
+test('the first garden ever starts a seed, and the first chat of the day brings a morning basket', async ($, on) => {
   const { clock } = await start($, on, { ...ONE, garden: garden(['c1'], { lastDay: '2026-11-1' }) })
   let t = await card($)
-  expect(t).toContain("This chat's tree: still growing")
+  expect(t).toContain('The tree: still growing')
+  expect(t).toContain('the tree is growing (0 of 7 messages)')
   expect(t).toContain("Ripe and waiting for the end of Claude's turn: 🔴 🔵 🟢 🟡")
   await turnEnd($)
   await clock.settle()
@@ -171,4 +173,94 @@ test("the band doesn't redraw while Claude works or talks, and your messages no 
   expect(tree1).not.toBe(tree0)
   expect(tree1).not.toContain('animateTransform attributeName=\\"transform\\" type=\\"translate\\"')
   expect(await pic(band, 'c1')).not.toContain('drop ')
+})
+
+// 1.2.0: one tree for every chat, kept in the store under 'tree'.
+const tree = (extra: Record<string, unknown> = {}) => ({ n: 3, grown: 0, snacks: 12, kind: { kind: '' }, work: { power: 0, swim: 0, run: 0, fly: 0 }, ...extra })
+
+test('a new chat carries on the tree the other chats grew', async ($, on) => {
+  const { band } = await start($, on, { ...ONE, tree: tree({ grown: 5, snacks: 7, work: { power: 4, swim: 0, run: 0, fly: 0 } }) })
+  let t = await card($)
+  expect(t).toContain('the tree is growing (5 of 7 messages)')
+  // young, not a seed: the band shows the saved tree
+  const young = await pic(band, 'tree')
+  expect(young).toContain('young')
+  await $.prompt.submit({ text: 'six' })
+  await $.prompt.submit({ text: 'seven' })
+  t = await card($)
+  console.log(t.split('\n').slice(0, 2).join('\n'))
+  // its kind comes from the work saved with the tree (all red), not from this chat
+  expect(t).toContain('The tree: plain (mostly 🔴 commands)')
+  expect(t).toContain('5 snacks left on the tree')
+})
+
+test("a bare full-grown tree goes at the end of Claude's turn and a new seed is planted", async ($, on) => {
+  const { clock, band } = await start($, on, { ...ONE, tree: tree({ grown: 11, snacks: 1, kind: { kind: 'plain', a: 'power' } }) })
+  expect(await card($)).toContain('1 snack left on the tree')
+  await $.prompt.submit({ text: 'last snack' })
+  let t = await card($)
+  expect(t).toContain('the tree is bare: a new seed after this turn')
+  expect(await pic(band, 'tree')).toContain('bare')
+  await turnEnd($)
+  await clock.settle()
+  t = await card($)
+  expect(t).toContain('the tree is growing (0 of 7 messages)')
+  expect(t).toContain('The tree: still growing')
+  expect(await pic(band, 'tree')).toContain('seed')
+  // the next message grows the new tree and finds a snack on it
+  await $.prompt.submit({ text: 'hello again' })
+  t = await card($)
+  expect(t).toContain('the tree is growing (1 of 7 messages)')
+})
+
+// The store file the chats share, by hand, so the test can play "another chat" writing to it.
+// `afterGet` runs after each read, as another chat could write right then.
+const sharedStore = (on: any, db: Record<string, unknown>, afterGet: (key: string) => void = () => {}) => {
+  on('store.get', (_: any, e: any) => {
+    const value = db[e.key] === undefined ? undefined : JSON.parse(JSON.stringify(db[e.key]))
+    afterGet(e.key)
+    return { value }
+  })
+  on('store.set', (_: any, e: any) => {
+    db[e.key] = JSON.parse(JSON.stringify(e.value))
+    return { value: undefined }
+  })
+  on('store.delete', (_: any, e: any) => {
+    delete db[e.key]
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: Object.keys(db) }))
+}
+
+test('a chat catches up with what another chat saved, and a change made meanwhile is not lost', async ($, on) => {
+  const db: Record<string, unknown> = { ...ONE, tree: tree({ grown: 2 }) }
+  // another chat sends a message right while this one is changing the garden (after this chat loaded the tree)
+  let otherChat = false
+  sharedStore(on, db, key => {
+    if (otherChat && key === 'tree') {
+      otherChat = false
+      const t = db.tree as any
+      db.tree = { ...t, grown: t.grown + 1, snacks: t.snacks - 1 }
+    }
+  })
+  const clock = mock.clock(on, { now: DAY })
+  mock.session(on)
+  on('command.register', () => ({ value: { command: 'x' } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_: any, e: any) => e)
+  on('turn.complete', (_: any, e: any) => ({ text: e.answer }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'chao-garden', surface: 'desktop', component: 'AbovePrompt', props: BAND })
+  expect(await pic(band, 'tree')).toContain('sprout')
+  // another chat grows the tree to young: this chat's band follows within a catch-up, with no message here
+  db.tree = tree({ grown: 5, snacks: 9 })
+  await clock.advance(16_000)
+  await clock.settle()
+  expect(await pic(band, 'tree')).toContain('young')
+  // a message here while the other chat sends one too: both count
+  otherChat = true
+  await $.prompt.submit({ text: 'hi' })
+  expect((db.tree as any).grown).toBe(7)
+  expect((db.tree as any).snacks).toBe(7)
+  expect(await card($)).toContain('7 snacks left on the tree')
 })

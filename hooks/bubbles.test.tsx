@@ -46,7 +46,8 @@ test('an animal shows under a framed bubble now and then, and clicking it gives 
   expect(await withAnimal.find({ key: 'animal' })).toBeUndefined()
   expect(await withAnimal.find({ key: 'frame' })).toBeDefined()
   const card = String(((await $.command.run({ command: 'chao', args: '' })) as any).text)
-  expect(card).toContain('Wearing:')
+  // the animal's own line on the card: what it wears, how often it was given (now counted), and its buff
+  expect(card).toMatch(/: wears [a-z ]+, given 1 time · /)
   expect(card).toMatch(/· 1 animals? ·/)
   void store
 })

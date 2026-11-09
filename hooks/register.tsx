@@ -1,17 +1,16 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { ChaoLook, FightLook, FruitColor, Scene, TreeKind, TreeLook, TurnWork } from '../types'
+import type { CardLook, ChaoLook, FightLook, FruitColor, GardenView, Scene, TreeLook, TurnWork } from '../types'
 import {
   ANIMALS,
   EMPTY_GARDEN,
   FRUIT_COLORS,
   PACES,
-  TREE_FRUITS,
-  TREE_GROWN,
   TREE_W,
   addWork,
   byName,
+  card,
   chaoArt,
   chaoLines,
   cleanName,
@@ -20,10 +19,12 @@ import {
   eggArt,
   eggSpot,
   endTurn,
+  firstActive,
   freshGarden,
   gardenCard,
   gardenLook,
   giveAnimal,
+  growTree,
   layEgg,
   lookOf,
   message,
@@ -32,15 +33,17 @@ import {
   newGarden,
   normalizeChao,
   normalizeGarden,
+  normalizeTree,
   pet,
+  replantTree,
   sameLook,
   setFriend,
   tick,
   trainee,
-  treeKindOf,
   treeLookOf,
   treeStage,
   treeSvg,
+  treeWork,
   walkOf,
   welcome,
   workOf,
@@ -62,8 +65,11 @@ import {
   WILD_EVERY,
 } from './battle'
 import type { Battle, BattleSave, Corruption } from './battle'
+import { chaoCardSvg, gardenCardSvg } from './card'
 import { challengerSvg, fightSvg } from './fight'
-import { CAVE_SVG } from './scenery'
+import { COURSES, RACE_EVERY, courseOf, courseOfDay, coursesText, normalizeRaceSave, payRace, raceLines, racesLeft, raceSvg, raceText, runRace, slimRace } from './race'
+import type { CourseId, Race, RaceSave } from './race'
+import { CAVE_SVG, NIGHT_SVG, SUNSET_SVG } from './scenery'
 
 // How many rows tall the band is (what the Gmail box used to hold up: on the desktop its border is a thin line,
 // so it was about 3 rows, marginTop 2 plus one text row). Raise it to make the band taller.
@@ -71,12 +77,31 @@ const BAND_ROWS = 3
 
 // The garden's look for the band; the full saves are in $.store under 'garden' and 'chao:<id>'.
 const gardenAtom = atom({ plugin: 'chao-garden', key: 'garden' } as const, EMPTY_GARDEN)
-// Fruits left on this chat's tree; -1 until the chat's first welcome, so a reload doesn't grow a new tree.
+// -1 until this chat's first welcome, so a reload of the mod doesn't welcome the chao again. (Before 1.2.0 it held
+// the snacks on this chat's own tree; the one tree is in the store now, under 'tree'.)
 const fruitsAtom = atom({ plugin: 'chao-garden', key: 'fruits' } as const, -1)
-// Messages you sent in this chat: they grow the tree, seed to full.
+// Messages you sent in this chat, for the "long chat" challenger. (The tree counts its own, from every chat.)
 const grownAtom = atom({ plugin: 'chao-garden', key: 'grown' } as const, 0)
 // The fruit drop in progress, and which chao have walked in for which drop.
 const sceneAtom = atom({ plugin: 'chao-garden', key: 'scene' } as const, { phase: 'none', eater: '', n: 0, by: {} } as Scene)
+
+// The chao cards in the side window (/chao, or a click on a chao in the band): which chao it shows, and a counter
+// that goes up whenever the garden changes, so the window (the only thing that reads it) draws again.
+const cardAtom = atom({ plugin: 'chao-garden', key: 'card' } as const, { pick: '', rev: 0 } as CardLook)
+const CARD_PANE = 'chao-cards'
+// The garden as last loaded or saved, for the side window to draw from without reading the store each time.
+let lastGarden: Garden | undefined
+let lastGardenSig = ''
+// Whether a click on the band opens the cards (/chao click on|off, kept in the store under 'cardsTouch' for every chat).
+const touchAtom = atom({ plugin: 'chao-garden', key: 'touch' } as const, true)
+const refreshTouch = async ($: any) => {
+  try {
+    const want = (await $.store.get('cardsTouch')) !== false
+    if ((await read($, touchAtom)) !== want) await update($, touchAtom, () => want)
+  } catch {}
+}
+// Whether the side window is open (set when it draws, cleared when it closes), so a closed window costs nothing.
+let cardsUp = false
 
 // A chao walks at this many pixels a second to the fruit; it then pauses to notice (NOTICE_S) and eats (EAT_S).
 const WALK_SPEED = 55
@@ -196,52 +221,85 @@ const animalButton = async ($: any, e: any, Button: any, has: boolean, hasEgg = 
   )
 }
 
-// Loads the whole garden. The first time, a new garden is made with two eggs.
-const loadGarden = async ($: any, now: number): Promise<Garden> => {
+// The saved values the garden is made of, as stored (to notice when another chat saved in between).
+const rawGarden = async ($: any, ids: string[]): Promise<string> => {
+  const out: unknown[] = [await $.store.get('garden'), await $.store.get('tree')]
+  for (const id of ids) out.push(await $.store.get(`chao:${id}`))
+  return JSON.stringify(out)
+}
+
+// Loads the whole garden and the one tree. The first time, a new garden is made with two eggs.
+const loadGarden = async ($: any, now: number, make = true): Promise<Garden & { raw: string }> => {
   const saved = await $.store.get('garden')
+  if (!saved && !make) throw new Error('no garden yet')
   if (!saved) {
     const gd = newGarden(now)
     for (const c of gd.chao) await $.store.set(`chao:${c.id}`, c)
     await $.store.set('garden', gd.g)
-    return gd
+    await $.store.set('tree', gd.tree)
+    return { ...gd, raw: await rawGarden($, gd.g.ids) }
   }
   const g = normalizeGarden(saved, now)
+  const savedTree = await $.store.get('tree')
+  const tree = normalizeTree(savedTree)
   const chao = []
-  for (const id of g.ids) chao.push(normalizeChao(await $.store.get(`chao:${id}`), id, now, g.days, g.turns))
-  return { g, chao }
+  const raws: unknown[] = [saved, savedTree]
+  for (const id of g.ids) {
+    const v = await $.store.get(`chao:${id}`)
+    raws.push(v)
+    chao.push(normalizeChao(v, id, now, g.days, g.turns))
+  }
+  return { g, chao, tree, raw: JSON.stringify(raws) }
 }
-
-type Tree = { fruits: number; grown: number }
 
 // Loads the garden, changes it, moves each chao along its life when due, saves what changed, and
 // refreshes the band's look when it changed. `mood` also lets the looks catch up (heart balls, a child's
 // lean and colour); otherwise they wait for the next chat.
 // One change at a time: Claude's tool runs, Claude's replies and turn ends come close together, and two changes loading the
-// garden at once would lose one of them.
+// garden at once would lose one of them. Other chats save to the same store, so just before saving it checks that
+// nothing changed since it loaded; if another chat saved in between, it starts over on what that chat saved
+// (`change` must only set things outside the garden, never add to them, so running it again is safe).
 let gardenLock: Promise<unknown> = Promise.resolve()
-const tendGarden = ($: any, change: (gd: Garden, now: number, tree: Tree) => void, mood = false): Promise<Garden | undefined> => {
+const tendGarden = ($: any, change: (gd: Garden, now: number) => void, mood = false): Promise<Garden | undefined> => {
   const run = gardenLock.then(() => tendGardenNow($, change, mood))
   gardenLock = run.catch(() => undefined)
   return run
 }
-const tendGardenNow = async ($: any, change: (gd: Garden, now: number, tree: Tree) => void, mood: boolean): Promise<Garden | undefined> => {
+const tendGardenNow = async ($: any, change: (gd: Garden, now: number) => void, mood: boolean): Promise<Garden | undefined> => {
   try {
-    const now: number = await $.clock.now()
-    const gd = await loadGarden($, now)
-    const before = new Map(gd.chao.map(c => [c.id, JSON.stringify(c)]))
-    const garden = JSON.stringify(gd.g)
-    const tree: Tree = { fruits: await read($, fruitsAtom), grown: await read($, grownAtom) }
-    const fruits = tree.fruits
-    const grown = tree.grown
-    change(gd, now, tree)
-    tick(gd, now)
-    for (const c of gd.chao) if (before.get(c.id) !== JSON.stringify(c)) await $.store.set(`chao:${c.id}`, c)
-    if (garden !== JSON.stringify(gd.g)) await $.store.set('garden', gd.g)
-    if (tree.fruits !== fruits) await update($, fruitsAtom, () => tree.fruits)
-    if (tree.grown !== grown) await update($, grownAtom, () => tree.grown)
+    let gd: Garden
+    for (let tries = 0; ; tries++) {
+      const now: number = await $.clock.now()
+      const { raw, ...loaded } = await loadGarden($, now)
+      gd = loaded
+      const ids = [...gd.g.ids]
+      const before = new Map(gd.chao.map(c => [c.id, JSON.stringify(c)]))
+      const garden = JSON.stringify(gd.g)
+      const tree = JSON.stringify(gd.tree)
+      change(gd, now)
+      tick(gd, now)
+      const changed =
+        before.size !== gd.chao.length || gd.chao.some(c => before.get(c.id) !== JSON.stringify(c)) || garden !== JSON.stringify(gd.g) || tree !== JSON.stringify(gd.tree)
+      if (!changed) break
+      if (tries < 3 && (await rawGarden($, ids)) !== raw) continue
+      for (const c of gd.chao) if (before.get(c.id) !== JSON.stringify(c)) await $.store.set(`chao:${c.id}`, c)
+      if (garden !== JSON.stringify(gd.g)) await $.store.set('garden', gd.g)
+      if (tree !== JSON.stringify(gd.tree)) await $.store.set('tree', gd.tree)
+      break
+    }
     const old = await read($, gardenAtom)
-    const want = gardenLook(gd, treeStage(tree.grown, tree.fruits), old, mood)
+    const want = gardenLook(gd, treeStage(gd.tree.grown, gd.tree.snacks), old, mood)
     if (!sameLook(old, want)) await update($, gardenAtom, () => want)
+    // the side window draws from this copy; it draws again only when something in the garden changed (here or in
+    // another chat, which the catch-up timer brings in)
+    lastGarden = gd
+    if (cardsUp) {
+      const sig = JSON.stringify([gd.g, gd.chao, gd.tree])
+      if (sig !== lastGardenSig) {
+        lastGardenSig = sig
+        await pokeCards($)
+      }
+    }
     // New stages and new chao show in the band itself; nothing pops up (the garden is only played when you
     // choose to). A hatched chao keeps its random name until /chao name.
     return gd
@@ -252,50 +310,50 @@ const tendGardenNow = async ($: any, change: (gd: Garden, now: number, tree: Tre
 
 // ---- Fruit ----
 // Claude's work ripens coloured fruit: commands red, reading blue, edits green, Claude's talking (and web use) yellow. The meters
-// live in the garden save; this chat's work decides its tree kind; at the end of each of Claude's turns the ripe fruit are
+// live in the garden save; Claude's work while the tree grows decides its kind; at the end of each of Claude's turns the ripe fruit are
 // eaten by picky chao and one of them falls from the tree in the band. Nothing in the band redraws while I work:
-// the tree's ripeness and kind have their own atom, changed only at a turn end and when a chat starts.
+// the tree's ripeness and kind have their own atom, changed only at a turn end, at your message, when a chat starts and
+// when it catches up with the other chats.
 const noWork = (): Record<FruitColor, number> => ({ power: 0, swim: 0, run: 0, fly: 0 })
-const treeKindAtom = atom({ plugin: 'chao-garden', key: 'treeKind' } as const, { kind: '' } as TreeKind)
-const chatWorkAtom = atom({ plugin: 'chao-garden', key: 'chatWork' } as const, noWork())
 const turnWorkAtom = atom({ plugin: 'chao-garden', key: 'turnWork' } as const, { ...noWork(), heard: 0 } as TurnWork)
 const treeLookAtom = atom({ plugin: 'chao-garden', key: 'treeLook' } as const, { kind: '', ripe: noWork() } as TreeLook)
 
 // Adds Claude's work to its colour: to the garden's meter (fruit ripen there), to this turn's work (the meters adapt
-// from it) and to this chat's work counted in fruit (the tree kind comes from it). `heard`: talking that came
-// through session.append.
+// from it) and, while the tree grows, to the tree's work counted in fruit (its kind comes from it). `heard`: talking
+// that came through session.append.
 const recordWork = async ($: any, color: Color, amount: number, heard = false) => {
   if (!(amount > 0)) return
   let meter = 0
   const gd = await tendGarden($, gd => {
     meter = meterOf(gd.g, color)
+    treeWork(gd, color, amount, meter)
     addWork(gd, color, amount)
   })
   if (!gd || !meter) return
   await update($, turnWorkAtom, w => ({ ...w, [color]: (w[color] ?? 0) + amount, heard: (w.heard ?? 0) + (heard ? amount : 0) }))
-  await update($, chatWorkAtom, w => ({ ...w, [color]: Math.round(((w[color] ?? 0) + amount / meter) * 1000) / 1000 }))
 }
 
 // The tree's picture catches up with the garden: its kind and each colour's ripeness.
 const refreshTreeLook = async ($: any, gd: Garden) => {
-  const want = treeLookOf(gd.g, await read($, treeKindAtom))
+  const want = treeLookOf(gd.g, gd.tree.kind)
   if (JSON.stringify(await read($, treeLookAtom)) !== JSON.stringify(want)) await update($, treeLookAtom, () => want)
 }
 
 // The end of one of Claude's turns (on the main loop): if no reply came through session.append, the turn's answer counts
-// as its talking; the meters adapt; every ripe fruit is eaten; the tree's picture catches up; and the last fruit
-// eaten falls in the band for its eater (not while that chao is fighting, nor while another drop still plays).
+// as its talking; the meters adapt; every ripe fruit is eaten (by the tree's kind); a bare full-grown tree goes and a new
+// seed is planted; the tree's picture catches up; and the last fruit eaten falls in the band for its eater (not while
+// that chao is fighting, nor while another drop still plays).
 const finishTurn = async ($: any, answer: string) => {
   try {
     const heard = (await read($, turnWorkAtom)).heard
     if (!heard && answer.length) await recordWork($, 'fly', answer.length)
     const work = await read($, turnWorkAtom)
     await update($, turnWorkAtom, () => ({ ...noWork(), heard: 0 }))
-    const tree = await read($, treeKindAtom)
     let meal: [Color, string][] = []
     const gd = await tendGarden($, gd => {
       endTurn(gd, work)
-      meal = eatReady(gd, tree)
+      meal = eatReady(gd, gd.tree.kind)
+      replantTree(gd)
     })
     if (!gd) return
     await refreshTreeLook($, gd)
@@ -303,8 +361,9 @@ const finishTurn = async ($: any, answer: string) => {
     if (!last) return
     const [color, eater] = last
     const fight = await read($, fightAtom)
+    const race = await read($, raceAtom)
     const scene = await read($, sceneAtom)
-    if (!(fight.on && fight.team.includes(eater)) && scene.phase === 'none') void runDrop($, eater, color)
+    if (!(fight.on && fight.team.includes(eater)) && !(race.on && race.team.includes(eater)) && scene.phase === 'none') void runDrop($, eater, color)
   } catch {}
 }
 
@@ -356,17 +415,22 @@ const startFight = async ($: any, why: 'error' | 'challenge' | 'wild' | 'practic
     const now: number = await $.clock.now()
     const f = await read($, fightAtom)
     if (f.on) return 'A fight is already playing in the band.'
+    if (raceBusy || (await read($, raceAtom)).on) return 'A race is running in the band: the omochao waits until it is over.'
     const save = await loadBattle($)
     const practice = why === 'practice'
     if (!practice && (save.off || now - save.last < FIGHT_COOLDOWN)) return 'not now'
     const ch = practice ? '' : await read($, challengeAtom)
     const challenge = ch in CORRUPTIONS
-    const out: { b?: Battle } = {}
+    // the reward is paid into a copy of the battle save, since the change runs again if another chat saved meanwhile
+    const out: { b?: Battle; paid?: typeof save } = {}
     const gd = await tendGarden($, gd => {
       const b = runBattle(gd.chao, Math.random, { foe: challenge ? (ch as Corruption) : undefined, hard: challenge ? CHALLENGE_HARD : 1, challenge, lock: save.lock })
-      if (b && !practice) b.reward = reward(gd.chao, b, save)
+      const paid = JSON.parse(JSON.stringify(save)) as typeof save
+      if (b && !practice) b.reward = reward(gd.chao, b, paid)
       out.b = b
+      out.paid = paid
     })
+    if (out.paid) Object.assign(save, out.paid)
     const b = out.b
     if (!gd) return 'Could not reach the garden save.'
     if (!b) return 'No fight yet: it needs at least one hatched chao.'
@@ -379,6 +443,7 @@ const startFight = async ($: any, why: 'error' | 'challenge' | 'wild' | 'practic
       save.due = wildDue(save.every)
       if (challenge) save.challengeDay = dayOf(now)
       await $.store.set('battle', save)
+      await pokeCards($)
     }
     await $.store.set('lastFight', slim(b))
     // the fighters as the band draws them, each walking in from where it is right now
@@ -438,6 +503,96 @@ const fightCard = async ($: any, gd: Garden): Promise<string[]> => {
   return lines
 }
 
+// ---- Races ----
+// /chao race: up to four hatched chao race along the band on the course of the day (or the one named). Like a fight,
+// the race is worked out at once, paid out (medals, the gold medal to wear, a little happiness, the course record)
+// and played back as ONE picture over the band while the racers' walkers step out. Only ever when you ask.
+const raceAtom = atom({ plugin: 'chao-garden', key: 'race' } as const, { n: 0, on: false, team: [] } as FightLook)
+const racePics = new Map<number, string>()
+let raceBusy = false
+
+const loadRace = async ($: any): Promise<RaceSave> => normalizeRaceSave(await $.store.get('race'))
+
+// `wild`: a surprise race that broke out on its own. Any race starts the count to the next surprise one again.
+const startRace = async ($: any, course?: CourseId, wild = false): Promise<Race | string> => {
+  if (raceBusy) return 'A race is already starting.'
+  if (fightBusy) return 'A fight is starting: race once it is over.'
+  raceBusy = true
+  try {
+    const now: number = await $.clock.now()
+    const ra = await read($, raceAtom)
+    if (ra.on) return 'A race is already running in the band.'
+    if ((await read($, fightAtom)).on) return 'A fight is playing in the band: race once it is over.'
+    const id = course ?? courseOfDay(now)
+    const saved = await loadRace($)
+    // the racers as the band draws them now (before the winner's medal goes on)
+    const look = await read($, gardenAtom)
+    // the payout goes into a copy of the race save, since the change runs again if another chat saved meanwhile
+    const out: { r?: Race; paid?: RaceSave } = {}
+    const gd = await tendGarden(
+      $,
+      gd => {
+        const r = runRace(gd.chao, id, Math.random)
+        const paid = JSON.parse(JSON.stringify(saved)) as RaceSave
+        if (r) payRace(gd, r, paid)
+        out.r = r
+        out.paid = paid
+      },
+      true,
+    )
+    const r = out.r
+    if (!gd) return 'Could not reach the garden save.'
+    if (!r || !out.paid) return 'No race yet: it needs at least one hatched chao (eggs and cocoons stay home).'
+    r.at = now
+    if (wild) r.wild = true
+    out.paid.since = 0
+    out.paid.due = wildDue(out.paid.every)
+    await $.store.set('race', out.paid)
+    await $.store.set('lastRace', slimRace(r))
+    await pokeCards($)
+    const looks: Record<string, ChaoLook> = {}
+    for (const c of gd.chao) looks[c.id] = look.chao.find(o => o.id === c.id) ?? lookOf(c, PACES[gd.g.pace])
+    const from: Record<string, number | undefined> = {}
+    for (const x of r.runners) from[x.id] = whereIs(x.id, now)
+    const n = ra.n + 1
+    const view: GardenView = gd.g.view === 'dark' || gd.g.view === 'light' ? gd.g.view : 'neutral'
+    const pic = raceSvg(r, looks, from, view, String(n))
+    racePics.clear()
+    racePics.set(n, pic.src)
+    await update($, raceAtom, () => ({ n, on: true, team: r.runners.map(x => x.id) }))
+    $.clock.after(Math.round(pic.total * 1000) + 300, () => {
+      void update($, raceAtom, s => (s.n === n ? { ...s, on: false, team: [] } : s))
+    })
+    return r
+  } catch {
+    return 'The race could not start.'
+  } finally {
+    raceBusy = false
+  }
+}
+
+// Counts one of your messages towards the next surprise race; true once it is due.
+const countRace = async ($: any): Promise<boolean> => {
+  try {
+    const save = await loadRace($)
+    if (save.off) return false
+    if (!save.due) save.due = wildDue(save.every)
+    save.since++
+    await $.store.set('race', save)
+    return save.since >= save.due
+  } catch {
+    return false
+  }
+}
+
+// The race lines of the /chao card.
+const raceCard = async ($: any, gd: Garden, now: number): Promise<string[]> => {
+  const save = await loadRace($)
+  const names: Record<string, string> = {}
+  for (const c of gd.chao) if (c.hatched) names[c.id] = c.name
+  return raceLines(save, names, gd.g.champ, courseOfDay(now))
+}
+
 const hatchedNames = (gd: Garden) =>
   gd.chao
     .filter(c => c.hatched)
@@ -445,14 +600,120 @@ const hatchedNames = (gd: Garden) =>
     .join(', ') || 'only eggs so far'
 
 
-// "Chao Garden" in cute script across the top of the band.
-const title = (): string =>
-  `<defs><linearGradient id="smg" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff8fc0"/><stop offset="0.5" stop-color="#ffd43b"/><stop offset="1" stop-color="#b197fc"/></linearGradient></defs>` +
+// ---- The chao cards (the side window) ----
+// Opened only when you ask: /chao, /chao <name>, or a click on the garden band (the chao nearest the click). Never on
+// its own. It shows one chao's picture card (tabs to switch), a Pet button, the garden's card, and the fights and races.
+
+// Tells the side window the garden changed. Only the window reads this, so nothing else redraws.
+const pokeCards = async ($: any) => {
+  if (!cardsUp) return
+  try {
+    await update($, cardAtom, c => ({ ...c, rev: (c.rev ?? 0) + 1 }))
+  } catch {}
+}
+
+// Opens the side window, on a chao if one is named. A window that the app cannot show right now (too narrow when it
+// was not asked for by a command) is closed again at once, so it can never turn up later by itself.
+const openCards = async ($: any, pick?: string): Promise<boolean> => {
+  try {
+    if (pick) await update($, cardAtom, c => ({ ...c, pick }))
+    const r = await $.ui.open({ id: CARD_PANE, title: 'Chao', columns: 64 })
+    if (r?.isPlaced) return true
+    await $.ui.close({ id: CARD_PANE })
+  } catch {}
+  return false
+}
+
+// Pixels per column in the desktop app (measured in the Phase 0 tests), for a click on the band.
+const PX_PER_COLUMN = 8
+
+// A click on the band (from the touch layer, `touch.tsx`): the chao nearest the click, if one is near, gets its
+// card in the side window; any other click on the garden opens the window as it was.
+const tapBand = async ($: any, column: number) => {
+  try {
+    const look = await read($, gardenAtom)
+    const now: number = await $.clock.now()
+    const px = (column + 0.5) * PX_PER_COLUMN
+    let best = ''
+    let bestD = 60
+    for (const c of look.chao) {
+      // walkers have their feet at x and their middle a little right of it; eggs and cocoons sit at their spot
+      const x = c.stage === 'egg' || c.stage === 'cocoon' ? eggSpot(c.id) : whereIs(c.id, now)
+      if (x === undefined) continue
+      const d = Math.abs(px - (x + 4 * BIG))
+      if (d < bestD) {
+        best = c.id
+        bestD = d
+      }
+    }
+    await openCards($, best || undefined)
+  } catch {}
+}
+
+// The Pet button on a card.
+const petCard = async ($: any, id: string) => {
+  await tendGarden(
+    $,
+    gd => {
+      const c = gd.chao.find(o => o.id === id)
+      if (c && c.stage !== 'egg') pet(c)
+    },
+    true,
+  )
+}
+
+// The garden for the side window: the copy kept from the last change, else a look at the store (never a save).
+const peekGarden = async ($: any, now: number): Promise<Garden | undefined> => {
+  if (lastGarden) return lastGarden
+  try {
+    const { raw, ...gd } = await loadGarden($, now, false)
+    return gd
+  } catch {
+    return undefined
+  }
+}
+
+// The words /chao help prints: the whole garden as text, the commands, and how it all works.
+const helpText = async ($: any, gd: Garden | undefined, now: number) =>
+  [
+    gd ? gardenCard(gd, now) : 'Could not reach the garden save.',
+    ...(gd ? ['', ...(await fightCard($, gd)), ...(await raceCard($, gd, now))] : []),
+    '',
+    ...COMMAND_LINES,
+    ...HOW_IT_WORKS,
+  ].join('\n')
+
+const HOW_IT_WORKS = [
+  "Claude's work ripens coloured fruit on the tree: commands red (Power), reading blue (Swim), edits green (Run), talking yellow (Fly). At the end of each of Claude's turns the ripe fruit fall to the chao that like that colour most (each chao has two favourites), and a fruit gives a lot of its own stat plus a little of others.",
+  "There is one tree, whatever chat you are in: your messages grow it (7 to full grown), and Claude's work while it grows makes it plain, twin or rainbow, which changes what the fruit give. Each message you send gives the hungriest chao a snack from it (+1 Stamina); once its 12 snacks are gone, the bare tree goes at the end of Claude's turn and a new seed is planted. Pictures are treats, the animals in bubbles go to a random hatched chao, and eggs hatch after 8 messages or 2 hours.",
+  'A garden day passes each day you open a chat. At one chao year a well-fed child makes a cocoon and comes out as one of 15 adult forms: Hero, Dark or Neutral from the hours you chat and petting, and Normal, Swim, Fly, Run or Power from its biggest stat (the next biggest can show on top).',
+  `Every so many messages (about ${WILD_EVERY} to start; /chao fight every <n> changes it), and when one of Claude's commands fails, a corrupted omochao turns up in the band and up to four hatched chao fight it on their own. Wins train them and leave a trophy; late nights, new moons and very long chats bring a tougher challenger once a day.`,
+  'In fights each chao also brings its temperament and its animals. Hero, Dark or Neutral each gives a passive, and a strong lean (+60 for a Hero, -60 for a Dark, within 15 of zero for a Neutral) a signature skill too: Rally, Shadow Bite or Mimic. Each animal it wears gives a small buff, two of its pieces a passive, and once that animal was given 3 times its skill too, while a piece is still on. The omochao grow a little with what the team brings. Each chao\'s card shows it all.',
+  "/chao race: up to four chao race along the band on the course of the day (meadow, lagoon, cliffs, sky or grand). Running goes on Run, the ponds on Swim, the climbs on Power and the glides on Fly; Stamina keeps them fast at the end. The first three win medals and the winner wears the gold one in the garden. A surprise race also breaks out on its own every so many messages (about " + RACE_EVERY + " to start; /chao race every <n> changes it, /chao race off stops them). Races give no stats.",
+]
+
+const COMMAND_LINES = [
+  '/chao [name] opens the chao cards in the side window (or click a chao in the garden; /chao click off stops that)  ·  /chao help shows all this as text',
+  '/chao name <old name> > <new name>  ·  /chao pet [name]  ·  /chao pace <slow|normal|fast>  ·  /chao visit <light|dark|neutral>  ·  /chao garden <on|off>  ·  /chao reset',
+  '/chao fight [now|off|on|every <n>]  ·  /chao team [<name>, <name>|clear]  ·  /chao race [<course>|last|courses|every <n>|off|on]',
+]
+
+// The garden's name in cute script across the top of the band: "Chao Garden" over the crystal cave, "Dark Garden"
+// in moonlight colours over the night wood, "Light Garden" in sunny colours over the sunset meadow.
+const title = (name: string, from: string, mid: string, to: string, left: string, right: string): string =>
+  `<defs><linearGradient id="smg" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="${from}"/><stop offset="0.5" stop-color="${mid}"/><stop offset="1" stop-color="${to}"/></linearGradient></defs>` +
   `<text x="450" y="34" font-size="19" font-style="italic" font-weight="bold" text-anchor="middle" fill="url(#smg)" stroke="#ffffff" stroke-width="0.6" paint-order="stroke" font-family="'Segoe Script','Brush Script MT','Comic Sans MS',cursive" letter-spacing="1">` +
-  `Chao Garden</text>` +
-  `<text x="362" y="31" font-size="10" fill="#ffd43b" text-anchor="middle">\u2726<animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/></text>` +
-  `<text x="538" y="31" font-size="10" fill="#ff8fc0" text-anchor="middle">\u2726<animate attributeName="opacity" values="0.2;1;0.2" dur="2.4s" repeatCount="indefinite"/></text>`
-const TITLE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="84" viewBox="0 0 900 84">${title()}</svg>`
+  `${name}</text>` +
+  `<text x="362" y="31" font-size="10" fill="${left}" text-anchor="middle">✦<animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/></text>` +
+  `<text x="538" y="31" font-size="10" fill="${right}" text-anchor="middle">✦<animate attributeName="opacity" values="0.2;1;0.2" dur="2.4s" repeatCount="indefinite"/></text>`
+const titleSvg = (...a: Parameters<typeof title>) => `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="84" viewBox="0 0 900 84">${title(...a)}</svg>`
+
+// The three gardens the band can show (/chao visit): the scenery behind everything and the title over it.
+const GARDENS: Record<GardenView, { scene: string; sceneAlt: string; title: string; name: string }> = {
+  neutral: { scene: CAVE_SVG, sceneAlt: 'A glowing crystal cave', title: titleSvg('Chao Garden', '#ff8fc0', '#ffd43b', '#b197fc', '#ffd43b', '#ff8fc0'), name: 'Chao Garden' },
+  light: { scene: SUNSET_SVG, sceneAlt: 'A flower meadow at sunset', title: titleSvg('Light Garden', '#ffe066', '#ffc2dc', '#fff4e0', '#ffe066', '#ffc2dc'), name: 'Light Garden' },
+  dark: { scene: NIGHT_SVG, sceneAlt: 'A moonlit night wood under the stars', title: titleSvg('Dark Garden', '#cfe8ff', '#d7c4ff', '#ff9ad5', '#fff3bf', '#ff9ad5'), name: 'Dark Garden' },
+}
 
 // `lift` raises the bubble, e.g. over the chao's floating ball; `side` puts it that far right of the head
 // instead, pointing back at it (a big chao leaves no room above it in the band).
@@ -600,6 +861,12 @@ const chaoSvg = (look: ChaoLook, width: number, y: number, ate?: { n: number; x0
   return { src, begin, trips, still }
 }
 
+// Set when the band's touch layer failed in the app: the band is drawn without it from then on.
+let touchBroken = false
+
+// How often an open chat's band catches up with what the other chats did to the garden.
+const CATCH_UP_MS = 15_000
+
 export const register: Register = (on, options) => {
   // the name the chao say they love (the `name` option; none: "I love you!")
   setFriend(options?.name)
@@ -607,34 +874,43 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'chao',
-      description: 'Your chao garden: see the chao, name them, pet them, their fights',
+      description: 'Your chao garden: see the chao, name them, pet them, their fights and races',
     })
 
     // A mod reload cancels the drop and fight timers, so a drop or fight caught half way is closed.
     await update($, sceneAtom, s => ({ ...s, phase: 'none' }))
     await update($, fightAtom, f => ({ ...f, on: false, team: [] }))
+    await update($, raceAtom, f => ({ ...f, on: false, team: [] }))
 
-    // A new chat: the chao remember you and a fresh tree grows. A reload of the mod runs this again in the same
-    // chat; the tree tells them apart.
-    // A new chat also starts a new tree kind and its own count of Claude's work; the first chat of the day brings the
-    // morning basket, one ripe fruit of each colour, eaten at the end of my first turn.
+    // A new chat: the chao remember you. A reload of the mod runs this again in the same chat; `fruits` tells them
+    // apart. The tree is the one every chat shares, so it carries on where it was. The first chat of the day brings
+    // the morning basket, one ripe fruit of each colour, eaten at the end of my first turn.
     let gd: Garden | undefined
     if ((await read($, fruitsAtom)) < 0) {
-      await update($, treeKindAtom, () => ({ kind: '' }))
-      await update($, chatWorkAtom, () => noWork())
       await update($, turnWorkAtom, () => ({ ...noWork(), heard: 0 }))
       gd = await tendGarden(
         $,
-        (gd, now, tree) => {
+        (gd, now) => {
           const { morning } = welcome(gd, now)
           if (morning) morningBasket(gd)
-          tree.fruits = TREE_FRUITS
         },
         true,
       )
+      if (gd) await update($, fruitsAtom, () => 0)
     } else gd = await tendGarden($, () => {}, true)
     if (gd) await refreshTreeLook($, gd)
     await refreshChallenge($, gd)
+    await refreshTouch($)
+
+    // Other chats grow the same tree and feed the same chao: every so often this chat's band catches up with them
+    // (it reads the store; nothing redraws unless something changed). A reload of the mod cancels the old timer.
+    $.clock.every(CATCH_UP_MS, () => {
+      void (async () => {
+        const gd = await tendGarden($, () => {})
+        if (gd) await refreshTreeLook($, gd)
+        await refreshTouch($)
+      })()
+    })
 
     return next(e)
   })
@@ -715,6 +991,63 @@ export const register: Register = (on, options) => {
       return { text: "No fight yet. An omochao turns up every so many messages, or when one of Claude's commands fails; /chao fight now plays a practice fight." }
     }
 
+    // /chao race runs the course of the day in the band; /chao race <course> another one; /chao race last shows
+    // the last race's times; /chao race courses lists the courses and their records.
+    if (what === 'race') {
+      const now: number = await $.clock.now()
+      if (/^(last|results?|times?)$/i.test(arg)) {
+        try {
+          const last = (await $.store.get('lastRace')) as Race | undefined
+          if (last && Array.isArray(last.runners) && last.course in COURSES) return { text: raceText(last) }
+        } catch {}
+        return { text: "No race yet. /chao race starts today's course in the band." }
+      }
+      if (/^(courses?|list|help|records?)$/i.test(arg)) {
+        try {
+          return { text: coursesText(await loadRace($), courseOfDay(now)) }
+        } catch {
+          return { text: lost }
+        }
+      }
+      if (rest[0] === 'every') {
+        try {
+          const save = await loadRace($)
+          const n = Math.round(Number(rest[1]))
+          if (!(n >= 3 && n <= 100))
+            return { text: `A surprise race breaks out about every ${save.every} messages (next in ${plural(racesLeft(save), 'message')}). Change it with /chao race every <3-100>.` }
+          save.every = n
+          save.due = wildDue(n)
+          await $.store.set('race', save)
+          return { text: `A surprise race now breaks out about every ${n} messages. The next one in ${plural(racesLeft(save), 'message')}.` }
+        } catch {
+          return { text: lost }
+        }
+      }
+      if (arg === 'off' || arg === 'on') {
+        try {
+          const save = await loadRace($)
+          if (arg === 'off') save.off = true
+          else delete save.off
+          await $.store.set('race', save)
+        } catch {
+          return { text: lost }
+        }
+        return {
+          text:
+            arg === 'off'
+              ? 'Surprise races are off. /chao race still starts one whenever you like, and /chao race on brings the surprise ones back.'
+              : 'Surprise races are on: every so many messages your chao race along the band on their own.',
+        }
+      }
+      const course = arg ? courseOf(arg) : courseOfDay(now)
+      if (!course) return { text: `There is no course called "${arg}".\n${coursesText(await loadRace($), courseOfDay(now))}` }
+      const r = await startRace($, course)
+      if (typeof r === 'string') return { text: r }
+      const names = r.runners.map(x => x.name)
+      const who = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} line up` : `${names[0]} lines up for a time trial`
+      return { text: `🏁 ${COURSES[course].name}! ${who} in the band (${COURSES[course].blurb}). Type /chao race last once they cross the line for the times.` }
+    }
+
     // /chao team shows who would fight; /chao team <name>, <name> keeps those in front; /chao team clear.
     if (what === 'team') {
       const gd = await tendGarden($, () => {})
@@ -758,6 +1091,44 @@ export const register: Register = (on, options) => {
       return { text: gd ? `Pace: ${pace}. 1 chao year is now ${PACES[pace]} garden day${PACES[pace] === 1 ? '' : 's'}.` : lost }
     }
 
+    // /chao visit light|dark|neutral picks which garden the band shows (kept in the save, so every chat opens on it).
+    if (what === 'visit') {
+      const want: GardenView | undefined = /^(dark|night|moon)/i.test(arg)
+        ? 'dark'
+        : /^(light|hero|sun|flower|meadow)/i.test(arg)
+          ? 'light'
+          : /^(neutral|chao|cave|crystal|home)/i.test(arg)
+            ? 'neutral'
+            : undefined
+      if (!want)
+        return { text: 'Which garden should the band show? /chao visit light (a flower meadow at sunset), /chao visit dark (a moonlit night wood) or /chao visit neutral (the crystal cave).' }
+      const gd = await tendGarden($, gd => {
+        gd.g.view = want
+      })
+      return {
+        text: !gd
+          ? lost
+          : want === 'dark'
+            ? 'Your chao wander into the Dark Garden, a moonlit night wood full of stars. /chao visit neutral takes them back to the crystal cave.'
+            : want === 'light'
+              ? 'Your chao skip into the Light Garden, a meadow full of flowers at sunset. /chao visit neutral takes them back to the crystal cave.'
+              : 'Your chao head home to the crystal cave. /chao visit light or /chao visit dark takes them to another garden.',
+      }
+    }
+
+    // /chao click off|on: whether a click on the garden band opens the chao cards (for every chat)
+    if (what === 'click' || what === 'touch') {
+      if (arg !== 'on' && arg !== 'off')
+        return { text: `A click on a chao in the garden ${(await read($, touchAtom)) ? 'opens' : 'does not open'} its card. /chao click on or /chao click off changes it.` }
+      try {
+        await $.store.set('cardsTouch', arg === 'on')
+      } catch {
+        return { text: lost }
+      }
+      await update($, touchAtom, () => arg === 'on')
+      return { text: arg === 'on' ? 'Click a chao in the garden to open its card in the side window.' : 'Clicking the garden no longer opens the chao cards (/chao still does). /chao click on brings it back.' }
+    }
+
     if (what === 'garden' && (rest[0] === 'on' || rest[0] === 'off')) {
       const gd = await tendGarden($, gd => {
         gd.g.show = rest[0] === 'on'
@@ -771,7 +1142,9 @@ export const register: Register = (on, options) => {
         const now: number = await $.clock.now()
         const old = await loadGarden($, now)
         for (const id of old.g.ids) await $.store.delete(`chao:${id}`)
-        const gd: Garden = { g: { ...freshGarden(now), show: old.g.show, days: old.g.days, lastDay: old.g.lastDay }, chao: [] }
+        const races = await loadRace($)
+        await $.store.set('race', { ...races, medals: {} })
+        const gd: Garden = { g: { ...freshGarden(now), show: old.g.show, days: old.g.days, lastDay: old.g.lastDay }, chao: [], tree: old.tree }
         layEgg(gd, now)
         for (const c of gd.chao) await $.store.set(`chao:${c.id}`, c)
         await $.store.set('garden', gd.g)
@@ -784,20 +1157,120 @@ export const register: Register = (on, options) => {
 
     const gd = await tendGarden($, () => {})
     const now: number = await $.clock.now()
-    return {
-      text: [
-        gd ? gardenCard(gd, await read($, fruitsAtom), now, await read($, treeKindAtom)) : lost,
-        ...(gd ? ['', ...(await fightCard($, gd))] : []),
-        '',
-        '/chao name <old name> > <new name>  ·  /chao pet [name]  ·  /chao pace <slow|normal|fast>  ·  /chao garden <on|off>  ·  /chao reset',
-        '/chao fight [now|off|on|every <n>]  ·  /chao team [<name>, <name>|clear]',
-        "Claude's work ripens coloured fruit on the tree: commands red (Power), reading blue (Swim), edits green (Run), talking yellow (Fly). At the end of each of Claude's turns the ripe fruit fall to the chao that like that colour most (each chao has two favourites), and a fruit gives a lot of its own stat plus a little of others.",
-        "Each new chat grows a new tree, and how it went makes it plain, twin or rainbow, which changes what the fruit give. Each message you send gives the hungriest chao a snack (+1 Stamina), pictures are treats, the animals in bubbles go to a random hatched chao, and eggs hatch after 8 messages or 2 hours.",
-        'A garden day passes each day you open a chat. At one chao year a well-fed child makes a cocoon and comes out as one of 15 adult forms: Hero, Dark or Neutral from the hours you chat and petting, and Normal, Swim, Fly, Run or Power from its biggest stat (the next biggest can show on top).',
-        `Every so many messages (about ${WILD_EVERY} to start; /chao fight every <n> changes it), and when one of Claude's commands fails, a corrupted omochao turns up in the band and up to four hatched chao fight it on their own. Wins train them and leave a trophy; late nights, new moons and very long chats bring a tougher challenger once a day.`,
-      ].join('\n'),
-    }
+    if (/^(help|text|card|info|\?)$/i.test(what ?? '')) return { text: await helpText($, gd, now) }
+    // /chao or /chao <name>: the chao cards in the side window; the text only where no window can be shown
+    const named = gd && e.args.trim() ? gd.chao.find(c => c.name && c.name.toLowerCase() === e.args.trim().toLowerCase()) : undefined
+    if (await openCards($, named?.id)) return { text: `🐣 ${named ? `${named.name}'s card is` : 'Your chao cards are'} open in the side window. Click a chao in the garden to see its card; /chao help shows everything as text.` }
+    return { text: await helpText($, gd, now) }
   })
+
+  // ---- The side window ----
+  on('ui.render', { component: 'Pane', requestId: CARD_PANE }, async ($, e) => {
+    const { Box, Text, Button, Svg } = $.ui.resolve(e) as any
+    cardsUp = true
+    const pane = await read($, cardAtom)
+    const now: number = await $.clock.now()
+    const gd = await peekGarden($, now)
+    if (!gd || !gd.chao.length) return <Text>Could not reach the garden save yet. Type /chao again in a moment.</Text>
+    const order = gd.g.ids.map(id => gd.chao.find(c => c.id === id)).filter(Boolean) as Garden['chao']
+    const shown = order.find(c => c.id === pane.pick) ?? firstActive(gd) ?? order[0]
+    let eggs = 0
+    const labelOf = (c: Garden['chao'][number]) => {
+      if (c.stage === 'egg') return `🥚 Egg${++eggs > 1 ? ` ${eggs}` : ''}`
+      return `${c.stage === 'cocoon' ? '✧ ' : ''}${c.name || 'Chao'}${gd.g.champ === c.id ? ' 🥇' : ''}`
+    }
+    const tabs = (
+      <Box key="tabs" flexDirection="row" flexWrap="wrap">
+        {order.map(c => (
+          <Box key={`tabbox-${c.id}`} marginRight={1}>
+            <Button key={`tab-${c.id}`} label={labelOf(c)} {...(c.id === shown?.id ? { variant: 'primary' } : {})} onPress={() => void update($, cardAtom, p => ({ ...p, pick: c.id }))} />
+          </Box>
+        ))}
+      </Box>
+    )
+    let fights: string[] = []
+    let races: string[] = []
+    try {
+      fights = await fightCard($, gd)
+      races = await raceCard($, gd, now)
+    } catch {}
+
+    // Anywhere but the desktop app (no pictures there): the same card as text.
+    if (e.surface !== 'desktop' || !Svg) {
+      return (
+        <Box flexDirection="column">
+          {tabs}
+          <Text>{shown ? card(gd, shown, now) : ''}</Text>
+          <Text> </Text>
+          <Text>{[...fights, ...races].join('\n')}</Text>
+        </Box>
+      )
+    }
+
+    const width = Math.max(280, Math.min(560, (e.props?.bodyColumns ?? 64) * PX_PER_COLUMN - 8))
+    let medals: [number, number, number] | undefined
+    try {
+      const m = (await loadRace($)).medals?.[shown?.id ?? '']
+      if (Array.isArray(m)) medals = [m[0] ?? 0, m[1] ?? 0, m[2] ?? 0]
+    } catch {}
+    const chaoPic = shown ? chaoCardSvg(gd, shown, now, gd.g.view, width, medals) : undefined
+    const gardenPic = gardenCardSvg(gd, treeLookOf(gd.g, gd.tree.kind), gd.g.view, width)
+    const canPet = shown && shown.stage !== 'egg'
+    return (
+      <Box flexDirection="column">
+        {tabs}
+        {chaoPic && shown ? (
+          <Box key="chao-card" marginTop={1}>
+            <Svg source={chaoPic.src} alt={`${shown.stage === 'egg' ? 'An egg' : shown.name}'s card`} width={width} height={chaoPic.height} />
+          </Box>
+        ) : null}
+        {canPet ? (
+          <Box key="card-buttons" flexDirection="row" marginTop={1}>
+            <Button key="card-pet" label={`♥ Pet ${shown.name}`} onPress={() => void petCard($, shown.id)} />
+          </Box>
+        ) : null}
+        <Box key="garden-card" marginTop={1}>
+          <Svg source={gardenPic.src} alt="The garden: the tree and the ripening fruit" width={width} height={gardenPic.height} />
+        </Box>
+        <Box key="card-words" flexDirection="column" marginTop={1}>
+          {[...fights, ...races].map((line, i) => (
+            <Text key={`w${i}`}>{line}</Text>
+          ))}
+          <Text> </Text>
+          {COMMAND_LINES.map((line, i) => (
+            <Text key={`c${i}`} dimColor>
+              {line}
+            </Text>
+          ))}
+        </Box>
+      </Box>
+    )
+  })
+
+  // A click on the garden band, from its touch layer: the nearest chao's card opens in the side window.
+  on('ui.message', async ($, e, next) => {
+    if (e.element !== 'band-touch') return next(e)
+    const d = (e.data ?? {}) as { kind?: string; x?: number }
+    if (d.kind === 'tap' && Number.isFinite(d.x)) void tapBand($, Number(d.x))
+    return {}
+  })
+
+  // The side window closed (its close mark, or the app): nothing needs to tell it about changes any more.
+  on('ui.close', async ($, e, next) => {
+    const r = await next(e)
+    if (e.id === CARD_PANE) {
+      cardsUp = false
+      lastGardenSig = ''
+    }
+    return r
+  })
+
+  // If the touch layer ever fails in the app, the band goes on without it (until the mod reloads).
+  on('ui.fault', async ($, e, next) => {
+    if (e.element === 'band-touch') touchBroken = true
+    return next(e)
+  })
+
 
   // Each tool run of Claude's on the main loop ripens its colour's fruit (no stats here any more: the chao get those by
   // eating), and a failed one calls up a corrupted omochao (not when you turned the run down yourself). Helpers'
@@ -858,30 +1331,35 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     live = true
-    // Every message you send grows the tree and gives the hungriest chao a snack from it; pictures are treats.
-    // Commands are not food. (The coloured fruit fall at the end of Claude's turns instead.)
+    // Every message you send (in any chat) grows the one tree and gives the hungriest chao a snack from it; pictures
+    // are treats. Commands are not food. (The coloured fruit fall at the end of Claude's turns instead.) The message
+    // that makes the tree full grown settles its kind, from Claude's work since it was planted.
     if (!e.command && !e.text.trim().startsWith('/')) {
-      let grown = 0
-      const gd = await tendGarden($, (gd, now, tree) => {
-        tree.grown++
-        grown = tree.grown
-        if (message(gd, now, !!e.attachments?.length, tree.fruits > 0)) tree.fruits--
+      await update($, grownAtom, n => (n ?? 0) + 1)
+      const gd = await tendGarden($, (gd, now) => {
+        if (message(gd, now, !!e.attachments?.length, growTree(gd))) gd.tree.snacks--
       })
-      // the message that makes the tree full grown settles its kind, from Claude's work in this chat so far
-      if (gd && grown >= TREE_GROWN && (await read($, treeKindAtom)).kind === '') {
-        const kind = treeKindOf(await read($, chatWorkAtom))
-        await update($, treeKindAtom, () => kind)
-        await refreshTreeLook($, gd)
-      }
+      if (gd) await refreshTreeLook($, gd)
       // the day's challenger waits by the tree for a few messages, then charges in; otherwise a wild omochao
       // wanders in every so many messages
+      let fightNow = false
       if (await refreshChallenge($, gd)) {
         challengeWait++
-        if (challengeWait >= CHALLENGE_WAIT) void startFight($, 'challenge')
+        if (challengeWait >= CHALLENGE_WAIT) {
+          fightNow = true
+          void startFight($, 'challenge')
+        }
       } else {
         challengeWait = 0
-        if (gd && fighters(gd.chao).length && (await countWild($))) void startFight($, 'wild')
+        if (gd && fighters(gd.chao).length && (await countWild($))) {
+          fightNow = true
+          void startFight($, 'wild')
+        }
       }
+      // a surprise race breaks out every so many messages too; never on a message that brings a fight (it waits for
+      // the next message, and for any fight or race still playing to end)
+      if (gd && fighters(gd.chao).length && (await countRace($)) && !fightNow) void startRace($, undefined, true)
+      await pokeCards($)
     }
     return next(e)
   })
@@ -916,22 +1394,27 @@ export const register: Register = (on, options) => {
     return withButtons(Box, await next(e), buttons)
   })
 
-  // The garden band above the typing box (desktop app only): the crystal cave (scenery.ts), the title, the tree, each chao, the day's
+  // The garden band above the typing box (desktop app only): the garden's scenery (the crystal cave, the moonlit night wood or the sunset meadow, scenery.ts), the title, the tree, each chao, the day's
   // challenger and any fight. With /chao garden off it shows nothing.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || e.surface !== 'desktop') return next(e)
     const look = await read($, gardenAtom)
     if (!look.show) return next(e)
 
-    const { Svg, Box } = $.ui.resolve(e)
+    const { Svg, Box, Client } = $.ui.resolve(e) as any
+    const touchOn = await read($, touchAtom)
+    const touchColumns = Math.max(10, Math.min(Math.ceil(900 / PX_PER_COLUMN), e.props.bodyColumns ?? 113))
+    const garden: GardenView = look.view === 'dark' || look.view === 'light' ? look.view : 'neutral'
     const drop = await read($, sceneAtom)
     const treeLook = await read($, treeLookAtom)
     const fight = await read($, fightAtom)
+    const race = await read($, raceAtom)
     const challenger = await read($, challengeAtom)
     const now: number = await $.clock.now()
-    // While a fight plays, its picture holds the fighters, so their walkers step out of the band.
+    // While a fight or a race plays, its picture holds the chao in it, so their walkers step out of the band.
     const fightPic = fight.on ? fightPics.get(fight.n) : undefined
-    const away = new Set(fightPic ? fight.team : [])
+    const racePic = race.on ? racePics.get(race.n) : undefined
+    const away = new Set([...(fightPic ? fight.team : []), ...(racePic ? race.team : [])])
 
     // The tree and each chao are pictures of their own over the stars, so a change to one chao redraws only that
     // one: the stars and the other chao keep going.
@@ -952,13 +1435,13 @@ export const register: Register = (on, options) => {
 
     return (
       <Box position="relative" overflow="hidden" flexDirection="column">
-        <Box position="absolute" top={-1} left={0}>
-          <Svg source={CAVE_SVG} alt="A glowing crystal cave" width={900} height={84} isInteractive />
+        <Box key={`scene-${garden}`} position="absolute" top={-1} left={0}>
+          <Svg source={GARDENS[garden].scene} alt={GARDENS[garden].sceneAlt} width={900} height={84} isInteractive />
         </Box>
         {/* The title is its own picture, so it can step aside while a fight plays in the middle of the band. */}
-        {fightPic ? null : (
+        {fightPic || racePic ? null : (
           <Box key="title" position="absolute" top={-1} left={0}>
-            <Svg source={TITLE_SVG} alt="Chao Garden" width={900} height={84} />
+            <Svg source={GARDENS[garden].title} alt={GARDENS[garden].name} width={900} height={84} />
           </Box>
         )}
         <Box key="tree" position="absolute" top={-1} left={12}>
@@ -970,7 +1453,7 @@ export const register: Register = (on, options) => {
           />
         </Box>
         {chao}
-        {challenger in CORRUPTIONS && !fightPic ? (
+        {challenger in CORRUPTIONS && !fightPic && !racePic ? (
           <Box key="challenger" position="absolute" top={-1} left={20}>
             <Svg source={challengerSvg(challenger as Corruption)} alt={`A ${CORRUPTIONS[challenger as Corruption].name} waits by the tree`} width={64} height={84} isInteractive />
           </Box>
@@ -978,6 +1461,17 @@ export const register: Register = (on, options) => {
         {fightPic ? (
           <Box key={`fight${fight.n}`} position="absolute" top={-1} left={0}>
             <Svg source={fightPic} alt="Your chao fight a corrupted omochao" width={900} height={84} isInteractive />
+          </Box>
+        ) : null}
+        {racePic ? (
+          <Box key={`race${race.n}`} position="absolute" top={-1} left={0}>
+            <Svg source={racePic} alt="Your chao race along the garden" width={900} height={84} isInteractive />
+          </Box>
+        ) : null}
+        {/* An invisible touch layer on top: a click on a chao opens its card in the side window. */}
+        {Client && touchOn && !touchBroken ? (
+          <Box key="touch" position="absolute" top={0} left={0} width={touchColumns} height={BAND_ROWS}>
+            <Client key="band-touch" module="./touch.tsx" props={{ rows: BAND_ROWS }} width={touchColumns} height={BAND_ROWS} />
           </Box>
         ) : null}
         {/* Everything above is absolute; this empty box is what gives the band its height. */}

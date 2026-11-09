@@ -1,4 +1,4 @@
-import { CLASSES, level, secondClass, classTier, classRanking } from './chao'
+import { CLASSES, level, secondClass, classTier, classRanking, traitsOf } from './chao'
 import type { ChaoSave, ChaoStats } from './chao'
 import type { ClassName } from '../types'
 
@@ -41,18 +41,35 @@ export type Fx =
   | 'slash' | 'guard' | 'whirl' | 'spark' | 'fire' | 'charge' | 'meteor' | 'arrow' | 'volley' | 'pierce'
   | 'soothe' | 'lullaby' | 'chorus' | 'tackle' | 'cheer' | 'tap'
   | 'hit' | 'windup' | 'unleash' | 'bind' | 'bugs' | 'crash' | 'burn' | 'asleep' | 'stuck'
+  // temperament and animal moves (1.6.0); 'glow' is Warm Heart at the start of a fight
+  | 'glow' | 'rally' | 'bite' | 'swipe' | 'slide' | 'hop' | 'hug' | 'pounce' | 'count' | 'squawk' | 'ram'
 
 type Skill = {
   name: string
   cls?: ClassName
   need: number
-  kind: 'hit' | 'all' | 'multi' | 'heal' | 'healAll' | 'shield' | 'sleep' | 'burn'
+  kind: 'hit' | 'all' | 'multi' | 'heal' | 'healAll' | 'shield' | 'sleep' | 'burn' | 'slow' | 'bind' | 'rally' | 'squawk' | 'mimic'
   mult: number
   fx: Fx
   pierce?: boolean
   windup?: boolean
   cd: number
-  fast?: boolean
+  // how much of its next move's meter it gets straight back (a quick move)
+  fast?: number
+  // from its temperament or its animals, not its class
+  trait?: boolean
+  // turns a sleep, slow or hold move lasts (sleep 2, slow 2, hold 1 if not given), and turns a burn lasts (3)
+  nap?: number
+  burns?: number
+  // extra crit chance on this move, and whether it burns only when it crits (Shadow Bite)
+  keen?: number
+  critBurn?: boolean
+  // only worth it on the omochao itself, not on a bug
+  boss?: boolean
+  // Swipe: may snatch an extra trophy
+  snatch?: boolean
+  // the word the fight log uses
+  verb?: string
 }
 
 const SKILLS: Skill[] = [
@@ -60,9 +77,9 @@ const SKILLS: Skill[] = [
   { name: 'Guard', cls: 'warrior', need: 6, kind: 'shield', mult: 0, fx: 'guard', cd: 4 },
   { name: 'Whirlwind', cls: 'warrior', need: 14, kind: 'all', mult: 0.9, fx: 'whirl', cd: 3 },
   { name: 'Spark', cls: 'wizard', need: 1, kind: 'hit', mult: 1.1, fx: 'spark', cd: 0 },
-  { name: 'Starfire', cls: 'wizard', need: 6, kind: 'burn', mult: 0.8, fx: 'fire', cd: 3 },
+  { name: 'Starfire', cls: 'wizard', need: 6, kind: 'burn', mult: 0.8, fx: 'fire', cd: 3, verb: 'casts' },
   { name: 'Meteor', cls: 'wizard', need: 14, kind: 'all', mult: 2, fx: 'meteor', windup: true, cd: 5 },
-  { name: 'Quick Shot', cls: 'ranger', need: 1, kind: 'hit', mult: 0.95, fx: 'arrow', fast: true, cd: 0 },
+  { name: 'Quick Shot', cls: 'ranger', need: 1, kind: 'hit', mult: 0.95, fx: 'arrow', fast: 25, cd: 0 },
   { name: 'Volley', cls: 'ranger', need: 6, kind: 'multi', mult: 0.55, fx: 'volley', cd: 3 },
   { name: 'Piercing Arrow', cls: 'ranger', need: 14, kind: 'hit', mult: 1.5, fx: 'pierce', pierce: true, cd: 3 },
   { name: 'Soothe', cls: 'healer', need: 1, kind: 'heal', mult: 1, fx: 'soothe', cd: 0 },
@@ -70,10 +87,34 @@ const SKILLS: Skill[] = [
   { name: 'Healing Chorus', cls: 'healer', need: 14, kind: 'healAll', mult: 0.7, fx: 'chorus', cd: 4 },
 ]
 
+// Skills from its temperament (a strong lean) and from the animals it wears and was given STACK_AT times (chao.ts traitsOf).
+export const TRAIT_SKILLS: Record<string, Skill> = Object.fromEntries(
+  (
+    [
+      { name: 'Rally', kind: 'rally', mult: 0.35, fx: 'rally', cd: 4 },
+      { name: 'Shadow Bite', kind: 'burn', mult: 1, fx: 'bite', cd: 3, burns: 2, keen: 25, critBurn: true, verb: 'uses' },
+      { name: 'Mimic', kind: 'mimic', mult: 0, fx: 'tap', cd: 3 },
+      { name: 'Swipe', kind: 'hit', mult: 0.7, fx: 'swipe', cd: 3, boss: true, snatch: true },
+      { name: 'Belly Slide', kind: 'slow', mult: 0.9, fx: 'slide', cd: 3, nap: 1 },
+      { name: 'Hop Strike', kind: 'hit', mult: 0.8, fx: 'hop', cd: 2, fast: 35 },
+      { name: 'Bear Hug', kind: 'bind', mult: 0.9, fx: 'hug', cd: 5, boss: true, nap: 1 },
+      { name: 'Pounce', kind: 'hit', mult: 1.6, fx: 'pounce', cd: 4, boss: true },
+      { name: 'Counting Sheep', kind: 'sleep', mult: 0, fx: 'count', cd: 5, nap: 1, verb: 'starts' },
+      { name: 'Squawk', kind: 'squawk', mult: 0.45, fx: 'squawk', cd: 4 },
+      { name: 'Charge', kind: 'hit', mult: 1.35, fx: 'ram', cd: 4, pierce: true, boss: true },
+    ] as Omit<Skill, 'need' | 'trait'>[]
+  ).map(s => [s.name, { ...s, need: 1, trait: true }]),
+)
+
 // A healer with nobody to heal taps the enemy; a chao without a class tackles (and cheers, if Swim is its best).
 const TAP: Skill = { name: 'Tap', cls: 'healer', need: 1, kind: 'hit', mult: 0.6, fx: 'tap', cd: 0 }
 const TACKLE: Skill = { name: 'Tackle', need: 1, kind: 'hit', mult: 0.85, fx: 'tackle', cd: 0 }
 const CHEER: Skill = { name: 'Cheer', need: 1, kind: 'heal', mult: 0.7, fx: 'cheer', cd: 1 }
+
+// A plain attack (no cooldown): what a chao does when none of its special moves fits right now.
+const basic = (s: Skill) => s.kind === 'hit' && s.cd === 0
+// Bad effects: healing moves clear them, and Woolly Coat makes them wear off sooner.
+const BAD: Status[] = ['burn', 'slow', 'glitched', 'bound', 'sleep']
 
 export type Unit = {
   id: string
@@ -95,14 +136,23 @@ export type Unit = {
   turns: number
   winding?: string
   minion?: boolean
+  // traits (1.6.0): extra crit and dodge chance (percent), its passives by name, what it already used up this fight, and
+  // how much its strong lean and animals add (a skill 1, a passive beyond its temperament's 0.5, a buff 0.25), which the
+  // omochao grows with
+  crit: number
+  dodge: number
+  pass: string[]
+  used: Record<string, boolean>
+  boost: number
 }
 
-// One hit (or heal) on one unit.
-export type Hit = { id: string; n: number; crit?: boolean; miss?: boolean; weak?: boolean; resist?: boolean; heal?: boolean }
+// One hit (or heal) on one unit; `back` is what a boar's Tusks gave back to whoever hit it.
+export type Hit = { id: string; n: number; crit?: boolean; miss?: boolean; weak?: boolean; resist?: boolean; heal?: boolean; back?: number }
 
 // What the band plays back: who did what to whom, then every unit's HP and statuses (letters) after it,
-// in the order of `Battle.units` (a bug called later is missing from the events before it came).
-export type BattleEvent = { actor: string; move: string; fx: Fx; targets: string[]; hits: Hit[]; status?: Status; hp: number[]; st: string[] }
+// in the order of `Battle.units` (a bug called later is missing from the events before it came). `mimic`: a Mimic of
+// that move; `snatch`: a Swipe that snatched a trophy.
+export type BattleEvent = { actor: string; move: string; fx: Fx; targets: string[]; hits: Hit[]; status?: Status; hp: number[]; st: string[]; mimic?: boolean; snatch?: boolean }
 
 export type BattleUnit = { id: string; name: string; side: 'team' | 'foe'; cls?: ClassName; corr?: Corruption; max: number; minion?: boolean; from: number }
 
@@ -117,6 +167,8 @@ export type Battle = {
   team: { id: string; name: string; cls?: ClassName; hp: number; max: number }[]
   log: string[]
   events: BattleEvent[]
+  // who snatched an extra trophy with Swipe (paid out only if the fight is won)
+  snatch?: string
   // set when the fight paid out (automatic fights only)
   reward?: string
   at?: number
@@ -128,24 +180,28 @@ const lv = (c: ChaoSave, k: keyof ChaoStats) => level(c.stats[k])
 // The stat a chao fights with: its class's, or for a chao without a class the strongest class stat.
 export const fightStat = (c: ChaoSave): keyof ChaoStats => CLASSES[c.cls?.main ?? classRanking(c)[0]?.[0] ?? 'warrior'].stat
 
+// Its class's skills, the best one its second class lends it, then the skills from its temperament and animals.
 export const skillsOf = (c: ChaoSave): Skill[] => {
-  if (!c.cls) return classRanking(c)[0]?.[0] === 'healer' ? [TACKLE, CHEER] : [TACKLE]
+  const traits = traitsOf(c).skills.map(n => TRAIT_SKILLS[n]).filter((s): s is Skill => !!s)
+  if (!c.cls) return [...(classRanking(c)[0]?.[0] === 'healer' ? [TACKLE, CHEER] : [TACKLE]), ...traits]
   const main = SKILLS.filter(s => s.cls === c.cls!.main && lv(c, CLASSES[c.cls!.main].stat) >= s.need)
   const second = secondClass(c)
   const extra = second ? SKILLS.filter(s => s.cls === second && lv(c, CLASSES[second].stat) >= s.need).slice(-1) : []
-  return [...main, ...extra]
+  return [...main, ...extra, ...traits]
 }
 
 // Babies and children fight too, a little weaker than adults.
 const STAGE_POWER: Partial<Record<ChaoSave['stage'], number>> = { baby: 0.7, child: 0.85, adult: 1 }
 
-// Battle stats from what a chao already has.
+// Battle stats from what a chao already has, with its animals' small buffs on top.
 export const unitOf = (c: ChaoSave): Unit => {
   const cls = c.cls?.main
   const grow = STAGE_POWER[c.stage] ?? 1
   const tier = (1 + 0.05 * classTier(c)) * grow
   const parts = Object.values(c.parts ?? {}).filter(Boolean).length
-  const max = Math.round((30 + 4 * lv(c, 'stamina') + c.happiness / 4 + parts) * tier)
+  const tr = traitsOf(c)
+  const add = (k: 'hp' | 'atk' | 'heal' | 'def' | 'spd' | 'crit' | 'dodge') => tr.buffs.reduce((a, b) => a + (b[k] ?? 0), 0)
+  const max = Math.round((30 + 4 * lv(c, 'stamina') + c.happiness / 4 + parts) * tier * (1 + add('hp')))
   const atkLv =
     cls === 'warrior' ? lv(c, 'power') : cls === 'wizard' ? lv(c, 'fly') : cls === 'ranger' ? lv(c, 'run') : cls === 'healer' ? lv(c, 'fly') : Math.max(lv(c, 'power'), lv(c, 'fly'), lv(c, 'run'))
   const passive = (k: keyof ChaoStats) => (lv(c, k) >= 5 ? 1 : 0)
@@ -156,18 +212,26 @@ export const unitOf = (c: ChaoSave): Unit => {
     cls,
     hp: max,
     max,
-    atk: Math.round((4 + 1.5 * atkLv + 2 * passive('power')) * tier),
-    heal: Math.round((4 + 1.5 * lv(c, 'swim') + 2 * passive('swim')) * grow),
-    def: 1 + Math.floor(lv(c, 'stamina') / 4) + passive('stamina'),
-    spd: 8 + lv(c, 'run') + 2 * passive('run'),
+    atk: Math.round((4 + 1.5 * atkLv + 2 * passive('power')) * tier * (1 + add('atk'))),
+    heal: Math.round((4 + 1.5 * lv(c, 'swim') + 2 * passive('swim')) * grow * (1 + add('heal'))),
+    def: 1 + Math.floor(lv(c, 'stamina') / 4) + passive('stamina') + add('def'),
+    spd: 8 + lv(c, 'run') + 2 * passive('run') + add('spd'),
     luck: Math.min(30, Math.round(c.happiness / 10)),
     meter: 0,
     st: {},
     skills: skillsOf(c),
     cd: {},
     turns: 0,
+    crit: add('crit') + (tr.passives.includes('Sharp Edge') ? 10 : 0),
+    dodge: add('dodge'),
+    pass: tr.passives,
+    used: {},
+    boost: tr.skills.length + 0.5 * (tr.passives.length - 1) + 0.25 * tr.buffs.length,
   }
 }
+
+// What an omochao or bug has of the traits: none.
+const NO_TRAITS = () => ({ crit: 0, dodge: 0, pass: [] as string[], used: {} as Record<string, boolean>, boost: 0 })
 
 // Who can fight: every hatched chao (not eggs or cocoons).
 export const fighters = (chao: ChaoSave[]) => chao.filter(c => c.stage === 'baby' || c.stage === 'child' || c.stage === 'adult')
@@ -185,12 +249,16 @@ export const pickTeam = (chao: ChaoSave[], foe: Corruption, lock: string[] = [])
     .map(x => x.c)
 
 // How strong an omochao is next to the team it meets (tuned on made-up teams).
-export const TUNE = { hp: 40, hpPer: 5.5, atk: 5, atkPer: 1.05, spd: 0.75, spdPer: 0.1, weak: 1.6, strong: 0.6, maxEvents: 60 }
+// `boostHp` and `boostAtk`: how much bigger and stronger it comes for each point of the team's average trait boost
+// (a strong lean's skill or an animal skill 1, an animal passive 0.5, a buff 0.25), so traits add variety more than ease.
+// (1.6.0: hpPer 5.5 -> 5.7 for the temperament passives every chao now has and special moves no longer being skipped.)
+export const TUNE = { hp: 40, hpPer: 5.7, atk: 5, atkPer: 1.05, spd: 0.75, spdPer: 0.1, weak: 1.6, strong: 0.6, maxEvents: 60, boostHp: 0.03, boostAtk: 0.05 }
 
 export const makeFoe = (corr: Corruption, team: Unit[], hard: number): Unit => {
   const n = team.length
   const avg = team.reduce((s, u) => s + Math.max(u.atk, u.heal * 0.9), 0) / n
-  const hp = Math.round((TUNE.hp + avg * TUNE.hpPer * n) * hard * (corr === 'error' ? 0.8 : 1))
+  const boost = team.reduce((s, u) => s + u.boost, 0) / n
+  const hp = Math.round((TUNE.hp + avg * TUNE.hpPer * n) * hard * (corr === 'error' ? 0.8 : 1) * (1 + TUNE.boostHp * boost))
   const spd = team.reduce((s, x) => s + x.spd, 0) / n
   return {
     id: 'foe',
@@ -199,7 +267,7 @@ export const makeFoe = (corr: Corruption, team: Unit[], hard: number): Unit => {
     corr,
     hp,
     max: hp,
-    atk: Math.round((TUNE.atk + avg * TUNE.atkPer) * hard * (corr === 'error' ? 1.35 : 1) * (0.7 + 0.075 * n)),
+    atk: Math.round((TUNE.atk + avg * TUNE.atkPer) * hard * (corr === 'error' ? 1.35 : 1) * (0.7 + 0.075 * n) * (1 + TUNE.boostAtk * boost)),
     heal: 0,
     def: corr === 'error' ? 3 : 1,
     spd: Math.round(spd * (TUNE.spd + TUNE.spdPer * n)),
@@ -209,6 +277,7 @@ export const makeFoe = (corr: Corruption, team: Unit[], hard: number): Unit => {
     skills: [],
     cd: {},
     turns: 0,
+    ...NO_TRAITS(),
   }
 }
 
@@ -231,42 +300,97 @@ export const runBattle = (chao: ChaoSave[], rng: Rng, o: FightOptions = {}): Bat
   const alive = (side: Unit['side']) => us.filter(u => u.side === side && u.hp > 0)
   const weak = (a: Unit, d: Unit) => (a.cls && d.corr ? (CORRUPTIONS[d.corr].weak.includes(a.cls) ? TUNE.weak : CORRUPTIONS[d.corr].strong === a.cls ? TUNE.strong : 1) : 1)
   const tag = (u: Unit) => u.name + (u.cls ? ` (${CLASSES[u.cls].name.split(' ')[0]})` : '')
+  // passives that speak up as they work (Adaptable, Second Wind) wait here and follow the move's own line
+  const notes: string[] = []
   const say = (s: string) => {
-    log.push(s)
+    log.push(s, ...notes.splice(0))
   }
+  // hits a move causes on top of its own (Tusks giving damage back), shown with the move
+  const pend: Hit[] = []
   const emit = (e: Omit<BattleEvent, 'hp' | 'st'>) => {
     events.push({
       ...e,
+      hits: [...e.hits, ...pend.splice(0)],
       hp: us.map(u => u.hp),
       st: us.map(u => STATUS_ORDER.filter(s => u.st[s]).map(s => STATUS_LETTER[s]).join('')),
     })
   }
+  const has = (u: Unit, passive: string) => u.pass.includes(passive)
   const setSt = (u: Unit, s: Status, t: number) => {
+    // Woolly Coat: bad effects wear off a turn sooner (never less than a turn)
+    if (BAD.includes(s) && has(u, 'Woolly Coat')) t = Math.max(1, t - 1)
     u.st[s] = Math.max(u.st[s] ?? 0, t)
   }
+  // Bright Song: while a chao with it is up, the team's heals are bigger
+  const song = () => (team.some(t => t.hp > 0 && has(t, 'Bright Song')) ? 1.15 : 1)
+  // which foe a Neutral chao has learned (Adaptable): the omochao, or the bugs as one
+  const foeKey = (a: Unit) => (a.minion ? 'bug' : a.id)
 
   const guardOn = () => team.some(u => u.hp > 0 && u.st.guarded)
   const hurt = (a: Unit, d: Unit, mult: number, pierce = false, area = false): Hit => {
     if (d.corr === 'static' && !area && rng() * 100 < d.luck) return { id: d.id, n: 0, miss: true }
-    if (d.side === 'team' && rng() * 100 < d.luck) return { id: d.id, n: 0, miss: true }
+    if (d.side === 'team' && rng() * 100 < d.luck + d.dodge) {
+      // Sneaky: a dodge gets its next move sooner
+      if (has(d, 'Sneaky')) d.meter += 25
+      return { id: d.id, n: 0, miss: true }
+    }
     const w = weak(a, d)
-    const crit = a.side === 'team' && rng() * 100 < a.luck
+    const crit = a.side === 'team' && rng() * 100 < a.luck + a.crit
     let dmg = a.atk * mult * w
     dmg = Math.max(1, dmg - (pierce ? 0 : d.def * 0.5))
     if (d.corr === 'error') dmg *= 0.6
     if (d.corr === 'static' && area) dmg *= 1.5
     if (d.side === 'team' && guardOn()) dmg *= 0.5
     if (crit) dmg *= 1.5
+    if (has(a, 'Finisher') && d.hp < d.max / 2) dmg *= 1.15
+    // the omochao's unleashed big move is the only area move coming from its side
+    if (area && a.side === 'foe' && has(d, 'Thick Down')) dmg *= 0.85
+    const learned = has(d, 'Adaptable') && a.side === 'foe'
+    if (learned && d.used[`adapt:${foeKey(a)}`]) dmg *= 0.9
     const n = Math.max(1, Math.round(dmg))
     d.hp = Math.max(0, d.hp - n)
     const h: Hit = { id: d.id, n }
     if (crit) h.crit = true
     if (w > 1) h.weak = true
     if (w < 1) h.resist = true
+    if (learned && !d.used[`adapt:${foeKey(a)}`] && d.hp > 0) {
+      d.used[`adapt:${foeKey(a)}`] = true
+      notes.push(`  ${d.name} is Adaptable: it learns the ${a.minion ? 'bugs' : a.name}'s moves and takes 10% less from them now.`)
+    }
+    if (has(d, 'Second Wind') && !d.used.wind && d.hp > 0 && d.hp < d.max / 3) {
+      d.used.wind = true
+      setSt(d, 'regen', 3)
+      notes.push(`  ${d.name} gets a Second Wind: Regen!`)
+    }
+    // Tusks: whoever hits it up close takes a little back
+    if (has(d, 'Tusks') && a.side === 'foe' && a.hp > 0) {
+      const back = Math.max(1, Math.round(n * 0.1))
+      a.hp = Math.max(0, a.hp - back)
+      h.back = back
+      pend.push({ id: a.id, n: back })
+    }
     return h
   }
-  const shown = (h: Hit) => (h.miss ? 'dodged' : `${h.n}${h.crit ? '!' : ''}${h.weak ? ' (weak)' : h.resist ? ' (resisted)' : ''}`)
+  const shown = (h: Hit) => (h.miss ? 'dodged' : `${h.n}${h.crit ? '!' : ''}${h.weak ? ' (weak)' : h.resist ? ' (resisted)' : ''}${h.back ? ` (Tusks: ${h.back} back)` : ''}`)
   const nameOf = (id: string) => us.find(u => u.id === id)?.name ?? id
+  // the last special move a chao used (what Mimic copies), and who snatched an extra trophy with Swipe
+  let lastMove: { s: Skill; by: string } | undefined
+  let snatcher = ''
+  // Each time the omochao is slowed, held or put to sleep, it gets better at shaking the next one off (25% more each
+  // time), so the team can't keep it still all fight. Returns whether it took hold.
+  const held: Record<string, number> = {}
+  const control = (d: Unit, s: Status, t: number): boolean => {
+    if (d.side === 'foe' && !d.minion) {
+      const n = held[d.id] ?? 0
+      if (rng() < 0.25 * n) {
+        notes.push(`  The ${d.name} shrugs it off!`)
+        return false
+      }
+      held[d.id] = n + 1
+    }
+    setSt(d, s, t)
+    return true
+  }
 
   const act = (u: Unit) => {
     const foes = alive(u.side === 'team' ? 'foe' : 'team')
@@ -307,7 +431,7 @@ export const runBattle = (chao: ChaoSave[], rng: Rng, o: FightOptions = {}): Bat
       if (k === 'bugged' && u.turns % 3 === 2 && us.filter(x => x.minion && x.hp > 0).length < 2) {
         const hp = 6 + Math.round(u.atk)
         const id = `bug${u.turns}`
-        us.push({ id, name: 'Bug', side: 'foe', hp, max: hp, atk: Math.max(2, Math.round(u.atk * 0.4)), heal: 0, def: 0, spd: u.spd + 2, luck: 5, meter: 0, st: {}, skills: [], cd: {}, turns: 0, minion: true })
+        us.push({ id, name: 'Bug', side: 'foe', hp, max: hp, atk: Math.max(2, Math.round(u.atk * 0.4)), heal: 0, def: 0, spd: u.spd + 2, luck: 5, meter: 0, st: {}, skills: [], cd: {}, turns: 0, minion: true, ...NO_TRAITS() })
         from[id] = events.length
         emit({ actor: u.id, move: 'Call Bugs', fx: 'bugs', targets: [id], hits: [] })
         return say(`${u.name} calls a Bug.`)
@@ -341,92 +465,154 @@ export const runBattle = (chao: ChaoSave[], rng: Rng, o: FightOptions = {}): Bat
       return
     }
 
-    // ---- team: the AI picks a move
+    // ---- team: the AI picks a move. Special moves come first: its class's own (best first), then its temperament's
+    // and animals' skills, then the one its second class lends it, each only when its test says it fits right now.
+    // A plain attack (no cooldown) never stands in their way: it is what it does when none of them fits.
     const rdy = u.skills.filter(s => !u.cd[s.name])
-    const ready = [...rdy.filter(s => s.cls === u.cls).reverse(), ...rdy.filter(s => s.cls !== u.cls)]
+    const ready = [
+      ...rdy.filter(s => s.cls === u.cls && !s.trait && !basic(s)).reverse(),
+      ...rdy.filter(s => s.trait),
+      ...rdy.filter(s => s.cls !== u.cls && !s.trait && !basic(s)),
+    ]
     const mates = alive('team')
     const lowest = mates.slice().sort((a, b) => a.hp / a.max - b.hp / b.max)[0] ?? u
     const hurtCount = mates.filter(x => x.hp / x.max < 0.6).length
     const sickCount = mates.filter(x => x.st.burn || x.st.slow || x.st.glitched || x.st.bound).length
-    let s: Skill | undefined
-    for (const c of ready) {
-      const ok =
-        c.kind === 'heal' ? lowest.hp / lowest.max < 0.55 :
-        c.kind === 'healAll' ? hurtCount >= 2 || sickCount >= 2 :
-        c.kind === 'shield' ? !guardOn() :
-        c.kind === 'sleep' ? tgt.side === 'foe' && !tgt.minion && !tgt.st.sleep && tgt.hp / tgt.max > 0.3 :
-        c.kind === 'burn' ? !tgt.st.burn :
-        true
-      if (ok) {
-        s = c
-        break
-      }
-    }
-    s ??= ready.filter(c => c.kind === 'hit')[0] ?? TAP
+    const onFoe = tgt.side === 'foe'
+    const fits = (c: Skill): boolean =>
+      c.kind === 'heal' ? lowest.hp / lowest.max < 0.55 :
+      c.kind === 'healAll' ? hurtCount >= 2 || sickCount >= 2 :
+      c.kind === 'shield' ? !guardOn() :
+      c.kind === 'sleep' ? onFoe && !tgt.minion && !tgt.st.sleep && !tgt.st.bound && tgt.hp / tgt.max > 0.3 :
+      c.kind === 'burn' ? !!c.critBurn || !tgt.st.burn :
+      c.kind === 'slow' ? onFoe && !tgt.st.slow :
+      c.kind === 'bind' ? onFoe && !tgt.minion && !tgt.st.bound && !tgt.st.sleep :
+      c.kind === 'rally' ? sickCount >= 1 || hurtCount >= 2 :
+      c.kind === 'squawk' ? hurtCount >= 2 || lowest.hp / lowest.max < 0.4 :
+      c.kind === 'mimic' ? !!lastMove && lastMove.by !== u.id && fits(lastMove.s) :
+      c.boss ? onFoe && !tgt.minion :
+      true
+    let s: Skill | undefined = ready.find(fits)
+    s ??= rdy.find(c => basic(c) && c.cls === u.cls) ?? rdy.find(basic) ?? TAP
     u.cd[s.name] = s.cd + 1
+    // Mimic: it does the move a teammate just did, as strong as the better of the two of them (Mimic's cooldown, not
+    // the move's); a copied Meteor falls with the copier's own strength
+    let mimic = false
+    let p = u
+    if (s.kind === 'mimic' && lastMove) {
+      const by = us.find(x => x.id === lastMove!.by)
+      say(`${tag(u)} uses Mimic: it copies ${nameOf(lastMove.by)}'s ${lastMove.s.name}!`)
+      s = lastMove.s
+      mimic = true
+      if (by) p = { ...u, atk: Math.max(u.atk, by.atk), heal: Math.max(u.heal, by.heal) }
+    } else if (!basic(s) && s.kind !== 'mimic') lastMove = { s, by: u.id }
     if (s.windup) {
       u.winding = s.name
-      emit({ actor: u.id, move: s.name, fx: 'charge', targets: [], hits: [] })
+      emit({ actor: u.id, move: s.name, fx: 'charge', targets: [], hits: [], mimic })
       return say(`${tag(u)} gathers starlight for ${s.name}...`)
     }
     const aim = tgt
+    const verb = s.verb ?? 'uses'
     switch (s.kind) {
       case 'hit': {
-        const h = hurt(u, aim, s.mult, s.pierce)
-        say(`${tag(u)} uses ${s.name} on ${aim.name}: ${shown(h)}`)
-        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: [h] })
-        if (s.fast) u.meter += 25
+        const h = hurt(p, aim, s.mult, s.pierce)
+        say(`${tag(u)} ${verb} ${s.name} on ${aim.name}: ${shown(h)}`)
+        // Swipe: a paw that lands on the omochao may come back with a bit of it (once a fight)
+        let snatch = false
+        if (s.snatch && !h.miss && !aim.minion && !snatcher && rng() < 0.35) {
+          snatcher = u.name
+          snatch = true
+          say(`  ${u.name} snatches a ${ITEMS[CORRUPTIONS[kind].drop]}! (an extra trophy if the team wins)`)
+        }
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: [h], mimic, snatch })
+        if (s.fast) u.meter += s.fast
         break
       }
       case 'multi': {
-        const hs = [0, 1, 2].map(() => hurt(u, aim, s.mult, s.pierce))
+        const hs = [0, 1, 2].map(() => hurt(p, aim, s.mult, s.pierce))
         say(`${tag(u)} fires ${s.name} at ${aim.name}: ${hs.map(h => (h.miss ? 'miss' : shown(h))).join(' + ')}`)
-        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: hs })
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: hs, mimic })
         break
       }
       case 'all': {
         const hit = alive('foe')
-        const hs = hit.map(t => hurt(u, t, s.mult, s.pierce, true))
+        const hs = hit.map(t => hurt(p, t, s.mult, s.pierce, true))
         say(`${tag(u)} uses ${s.name}: ${hs.map(h => `${nameOf(h.id)} ${shown(h)}`).join(', ')}`)
-        emit({ actor: u.id, move: s.name, fx: s.fx, targets: hit.map(t => t.id), hits: hs })
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: hit.map(t => t.id), hits: hs, mimic })
         break
       }
       case 'burn': {
-        const h = hurt(u, aim, s.mult)
-        if (!h.miss) setSt(aim, 'burn', 3)
-        say(`${tag(u)} casts ${s.name} on ${aim.name}: ${h.miss ? 'dodged' : shown(h) + ', burning'}`)
-        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: [h], status: h.miss ? undefined : 'burn' })
+        const h = hurt(s.keen ? { ...p, crit: p.crit + s.keen } : p, aim, s.mult)
+        // Starfire always sets it burning; a Shadow Bite only when it crits
+        const lit = !h.miss && aim.hp > 0 && (!s.critBurn || !!h.crit)
+        if (lit) setSt(aim, 'burn', s.burns ?? 3)
+        say(`${tag(u)} ${s.verb ?? 'casts'} ${s.name} on ${aim.name}: ${h.miss ? 'dodged' : shown(h) + (lit ? ', burning' : '')}`)
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: [h], status: lit ? 'burn' : undefined, mimic })
+        break
+      }
+      case 'slow': {
+        const h = hurt(p, aim, s.mult)
+        const took = !h.miss && aim.hp > 0 && control(aim, 'slow', s.nap ?? 2)
+        say(`${tag(u)} ${verb} ${s.name} on ${aim.name}: ${h.miss ? 'dodged' : shown(h) + (took ? ', slowed' : '')}`)
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: [h], status: took ? 'slow' : undefined, mimic })
+        break
+      }
+      case 'bind': {
+        const h = hurt(p, aim, s.mult)
+        const took = !h.miss && aim.hp > 0 && control(aim, 'bound', s.nap ?? 1)
+        say(`${tag(u)} ${verb} ${s.name} on ${aim.name}: ${h.miss ? 'dodged' : shown(h) + (took ? ', held still for a turn' : '')}`)
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: [h], status: took ? 'bound' : undefined, mimic })
         break
       }
       case 'heal': {
-        const n = Math.max(1, Math.round(u.heal * s.mult))
+        const n = Math.max(1, Math.round(p.heal * s.mult * song()))
         lowest.hp = Math.min(lowest.max, lowest.hp + n)
         say(`${tag(u)} uses ${s.name} on ${lowest.name}: +${n} HP`)
-        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [lowest.id], hits: [{ id: lowest.id, n, heal: true }] })
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [lowest.id], hits: [{ id: lowest.id, n, heal: true }], mimic })
         break
       }
       case 'healAll': {
-        const n = Math.round(u.heal * s.mult * 1.2)
+        const n = Math.round(p.heal * s.mult * 1.2 * song())
         for (const t of mates) {
           t.hp = Math.min(t.max, t.hp + n)
           for (const b of ['burn', 'slow', 'glitched', 'bound'] as Status[]) delete t.st[b]
           setSt(t, 'regen', 2)
         }
         say(`${tag(u)} sings ${s.name}: everyone +${n} HP, bad effects cleared`)
-        emit({ actor: u.id, move: s.name, fx: s.fx, targets: mates.map(t => t.id), hits: mates.map(t => ({ id: t.id, n, heal: true })), status: 'regen' })
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: mates.map(t => t.id), hits: mates.map(t => ({ id: t.id, n, heal: true })), status: 'regen', mimic })
+        break
+      }
+      case 'rally': {
+        // a little HP for everyone, bad effects gone, and the others get their next move sooner
+        const n = Math.max(1, Math.round(p.heal * s.mult * song()))
+        for (const t of mates) {
+          t.hp = Math.min(t.max, t.hp + n)
+          for (const b of ['burn', 'slow', 'glitched', 'bound'] as Status[]) delete t.st[b]
+          if (t !== u) t.meter += 30
+        }
+        say(`${tag(u)} calls a ${s.name}: everyone +${n} HP, bad effects cleared, the team moves sooner`)
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: mates.map(t => t.id), hits: mates.map(t => ({ id: t.id, n, heal: true })), mimic })
+        break
+      }
+      case 'squawk': {
+        const n = Math.max(1, Math.round(p.heal * s.mult * song()))
+        for (const t of mates) t.hp = Math.min(t.max, t.hp + n)
+        say(`${tag(u)} lets out a ${s.name}: everyone +${n} HP`)
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: mates.map(t => t.id), hits: mates.map(t => ({ id: t.id, n, heal: true })), mimic })
         break
       }
       case 'shield': {
         for (const t of mates) setSt(t, 'guarded', 2)
         say(`${tag(u)} raises ${s.name}: the party is shielded`)
-        emit({ actor: u.id, move: s.name, fx: s.fx, targets: mates.map(t => t.id), hits: [], status: 'guarded' })
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: mates.map(t => t.id), hits: [], status: 'guarded', mimic })
         break
       }
       case 'sleep': {
-        setSt(aim, 'sleep', 2)
-        aim.winding = undefined
-        say(`${tag(u)} sings ${s.name}: ${aim.name} falls asleep`)
-        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: [], status: 'sleep' })
+        const nap = s.nap ?? 2
+        const took = control(aim, 'sleep', nap)
+        if (took) aim.winding = undefined
+        say(`${tag(u)} ${s.verb ?? 'sings'} ${s.name}${took ? `: ${aim.name} falls asleep${nap === 1 ? ' for a turn' : ''}` : ` at ${aim.name}`}`)
+        emit({ actor: u.id, move: s.name, fx: s.fx, targets: [aim.id], hits: [], status: took ? 'sleep' : undefined, mimic })
         break
       }
     }
@@ -446,7 +632,7 @@ export const runBattle = (chao: ChaoSave[], rng: Rng, o: FightOptions = {}): Bat
     }
     let can = u.hp > 0
     if (can && (u.st.sleep || u.st.bound)) {
-      say(`  ${u.name} is ${u.st.sleep ? 'asleep' : 'tangled in wires'} and cannot act.`)
+      say(`  ${u.name} is ${u.st.sleep ? 'asleep' : u.side === 'foe' ? 'held tight' : 'tangled in wires'} and cannot act.`)
       emit({ actor: u.id, move: u.st.sleep ? 'Asleep' : 'Bound', fx: u.st.sleep ? 'asleep' : 'stuck', targets: [], hits: [] })
       can = false
     }
@@ -471,6 +657,21 @@ export const runBattle = (chao: ChaoSave[], rng: Rng, o: FightOptions = {}): Bat
   if (o.challenge) say(`★ Challenge of the day ★`)
   say(`A ${foe.name} appears (${CORRUPTIONS[kind].blurb}). Weak to ${weakTo}, strong against ${CLASSES[CORRUPTIONS[kind].strong].name.split(' ')[0]}.`)
   say(`Team: ${team.map(tag).join(', ')}`)
+  const extras = (t: Unit) => [...t.pass, ...t.skills.filter(s => s.trait).map(s => s.name)]
+  say(`Traits: ${team.map(t => `${t.name}: ${extras(t).join(', ')}`).join(' · ')}`)
+
+  // ---- passives that work before the first move
+  const heart = team.find(t => has(t, 'Warm Heart'))
+  if (heart) {
+    for (const t of team) setSt(t, 'regen', 2)
+    say(`${heart.name}'s Warm Heart: the whole team starts with Regen.`)
+    emit({ actor: heart.id, move: 'Warm Heart', fx: 'glow', targets: team.map(t => t.id), hits: [], status: 'regen' })
+  }
+  for (const t of team)
+    if (has(t, 'Head Start')) {
+      t.meter = 50
+      say(`${t.name} gets a Head Start.`)
+    }
 
   let turns = 0
   while (!done(us, 'team') && !done(us, 'foe') && events.length < TUNE.maxEvents && turns < 400) {
@@ -512,6 +713,7 @@ export const runBattle = (chao: ChaoSave[], rng: Rng, o: FightOptions = {}): Bat
     team: team.map(t => ({ id: t.id, name: t.name, cls: t.cls, hp: t.hp, max: t.max })),
     log,
     events,
+    ...(snatcher ? { snatch: snatcher } : {}),
   }
 }
 
@@ -568,9 +770,12 @@ export const reward = (chao: ChaoSave[], b: Battle, save: BattleSave): string =>
     return `Practice for next time: ${gains.join(', ')}.`
   }
   save.wins++
-  const found = [CORRUPTIONS[b.foe].drop, ...(b.challenge ? ['core'] : [])]
+  // a raccoon's Swipe may have snatched a second one of the omochao's bits
+  const drop = CORRUPTIONS[b.foe].drop
+  const found = [drop, ...(b.snatch ? [drop] : []), ...(b.challenge ? ['core'] : [])]
   for (const it of found) save.items[it] = (save.items[it] ?? 0) + 1
-  return `Rewards: ${gains.join(', ')}, everyone +${2 * k} Stamina and +${4 * k} happiness. Found: ${found.map(it => ITEMS[it]).join(' and ')}.`
+  const named = [`${ITEMS[drop]}${b.snatch ? ` ×2 (${b.snatch} swiped one)` : ''}`, ...(b.challenge ? [ITEMS.core] : [])]
+  return `Rewards: ${gains.join(', ')}, everyone +${2 * k} Stamina and +${4 * k} happiness. Found: ${named.join(' and ')}.`
 }
 
 export const trophies = (save: BattleSave) =>

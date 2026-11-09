@@ -22,6 +22,8 @@ export type ChaoLook = {
   special?: boolean
   // adults that have found their class
   cls?: ChaoClass
+  // the winner of the last race wears the gold medal (/chao race)
+  medal?: boolean
 }
 
 // The four adventurer classes. Each comes from one stat: Healer (a bard with a lyre) from Swim, Warrior from Power,
@@ -41,12 +43,12 @@ export type TreeLevel = 'seed' | 'sprout' | 'sapling' | 'young' | 'full' | 'half
 // green Run (Claude's edits), yellow Fly (Claude's talking and web use).
 export type FruitColor = 'swim' | 'fly' | 'run' | 'power'
 
-// This chat's tree kind, settled once when the tree is full grown ('' until then): plain (one kind of work), twin
+// The tree's kind (the one tree every chat shares), settled once when it is full grown ('' until then): plain (one kind of work), twin
 // (two kinds, `a` and `b`) or rainbow (a mix). It changes the fruit's recipe.
 export type TreeKind = { kind: '' | 'plain' | 'twin' | 'rainbow'; a?: FruitColor; b?: FruitColor }
 
 // What the band draws of the tree beyond its stage: its kind and how ripe each colour's fruit is (0 bud, 1 small,
-// 2 half, 3 ripe). Changes only at the end of Claude's turn and when a chat starts.
+// 2 half, 3 ripe). Changes only at the end of Claude's turn, at your messages, when a chat starts and when it catches up.
 export type TreeLook = TreeKind & { ripe: Record<FruitColor, number> }
 
 // Claude's work in this turn so far, per colour (runs, or characters for yellow); `heard` is how much of Claude's talking
@@ -59,8 +61,13 @@ export type TurnWork = Record<FruitColor, number> & { heard: number }
 export type Scene = { phase: 'none' | 'fall' | 'walk'; eater: string; n: number; by: Record<string, { n: number; x0: number }>; color?: FruitColor }
 
 // What the band needs to draw the garden: whether it shows, the fruit tree and each chao.
+// The garden on screen: the Neutral crystal cave, the Dark night wood or the Light sunset meadow (/chao visit).
+export type GardenView = 'neutral' | 'dark' | 'light'
+
 export type GardenLook = {
   show: boolean
+  // missing in looks made by older code: the Neutral garden
+  view?: GardenView
   tree: TreeLevel
   chao: ChaoLook[]
 }
@@ -69,12 +76,16 @@ export type GardenLook = {
 // and which chao are in it (their walkers step out of the band while it plays).
 export type FightLook = { n: number; on: boolean; team: string[] }
 
+// The chao cards in the side window: which chao it shows ('' = the first hatched one), and a counter that goes up
+// whenever the garden changes, so the window draws again (nothing else reads it).
+export type CardLook = { pick: string; rev: number }
+
 declare module 'claude-code' {
   interface PluginState {
-    // garden: the band's look; fruits: fruits left on this chat's tree (-1 until the chat's first welcome)
+    // garden: the band's look; fruits: -1 until the chat's first welcome (it held this chat's own tree before 1.2.0);
+    // grown: your messages in this chat (for the long-chat challenger; the shared tree is in the store)
     // animalTaken: per message, whether its animal was already given to a chao
     // fight: the fight playing in the band; challenge: the day's challenger waiting by the tree ('' when none)
-    // treeKind: this chat's tree kind; chatWork: this chat's work in fruit (work / meter per colour);
     // turnWork: Claude's work in the turn so far; treeLook: what the band draws of the tree (kind and ripeness)
     'chao-garden': {
       garden: GardenLook
@@ -85,10 +96,14 @@ declare module 'claude-code' {
       eggTaken: StateFamily<boolean>
       fight: FightLook
       challenge: string
-      treeKind: TreeKind
-      chatWork: Record<FruitColor, number>
       turnWork: TurnWork
       treeLook: TreeLook
+      // race: the race playing in the band (same shape as a fight: its number, whether it is on, who runs)
+      race: FightLook
+      // card: the side window's chao cards (which chao, and a change counter)
+      card: CardLook
+      // touch: whether a click on the garden band opens the chao cards (/chao click on|off; saved in the store)
+      touch: boolean
     }
   }
 }
